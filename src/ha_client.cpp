@@ -1,0 +1,426 @@
+#include "ha_client.h"
+
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
+#include <WebSocketsClient.h>
+
+#include "app_config.h"
+
+static WebSocketsClient ws;
+static bool g_wsStarted = false;
+static bool g_wsAuthed = false;
+static uint32_t g_wsMessageId = 1;
+
+static HaStateCallback g_stateCb = nullptr;
+static HaStatusCallback g_statusCb = nullptr;
+static HaAuthCallback g_authCb = nullptr;
+
+// ---------------------------------------------------------------------
+//  Helpers
+// ---------------------------------------------------------------------
+String asciiText(const String& text) {
+    String out;
+    out.reserve(text.length());
+    for (size_t i = 0; i < text.length(); i++) {
+        unsigned char c = (unsigned char)text[i];
+        if (c >= 32 && c < 127) out += (char)c;
+    }
+    out.trim();
+    return out;
+}
+
+String entityDomain(const String& id) {
+    int dot = id.indexOf('.');
+    return dot > 0 ? id.substring(0, dot) : String("");
+}
+
+EntityType entityTypeFromId(const String& id) {
+    if (id.startsWith("light.")) return EntityType::Light;
+    if (id.startsWith("switch.")) return EntityType::Switch;
+    if (id.startsWith("input_boolean.")) return EntityType::Switch;
+    if (id.startsWith("fan.")) return EntityType::Switch;
+    if (id.startsWith("climate.")) return EntityType::Climate;
+    if (id.startsWith("scene.")) return EntityType::Scene;
+    if (id.startsWith("script.")) return EntityType::Scene;
+    if (id.startsWith("media_player.")) return EntityType::Media;
+    if (id.startsWith("sensor.")) return EntityType::Sensor;
+    if (id.startsWith("binary_sensor.")) return EntityType::Sensor;
+    if (id.startsWith("cover.")) return EntityType::Cover;
+    return EntityType::Unknown;
+}
+
+String defaultNameFromId(const String& id) {
+    int dot = id.indexOf('.');
+    String raw = dot >= 0 ? id.substring(dot + 1) : id;
+    String out;
+    out.reserve(raw.length());
+    bool cap = true;
+    for (size_t i = 0; i < raw.length(); i++) {
+        char c = raw[i];
+        if (c == '_' || c == '-') {
+            out += ' ';
+            cap = true;
+        } else if (cap) {
+            out += (char)toupper((unsigned char)c);
+            cap = false;
+        } else {
+            out += c;
+        }
+    }
+    return out;
+}
+
+static void notifyStatus(bool online) {
+    if (g_statusCb) g_statusCb(online);
+}
+
+static void deriveOn(EntityState& e) {
+    switch (e.type) {
+        case EntityType::Light:
+        case EntityType::Switch:
+            e.on = (e.state == "on");
+            break;
+        case EntityType::Climate:
+            e.on = (e.state != "off" && e.state != "unavailable");
+            break;
+        case EntityType::Media:
+            e.on = (e.state == "playing" || e.state == "on");
+            break;
+        case EntityType::Cover:
+            e.on = (e.state == "open" || e.state == "opening");
+            break;
+        default:
+            e.on = false;
+            break;
+    }
+}
+
+static bool parseState(EntityState& e, JsonVariantConst obj) {
+    if (obj.isNull()) {
+        e.state = "unavailable";
+        e.available = false;
+        return true;
+    }
+
+    e.type = entityTypeFromId(e.id);
+    e.state = obj["state"].as<String>();
+    JsonVariantConst attrs = obj["attributes"];
+
+    e.name = attrs["friendly_name"].as<String>();
+    if (e.name.isEmpty()) e.name = defaultNameFromId(e.id);
+    e.name = asciiText(e.name);
+
+    e.unit = asciiText(attrs["unit_of_measurement"].as<String>());
+    e.brightness = attrs["brightness"] | -1;
+    e.current = attrs["current_temperature"] | NAN;
+    e.target = attrs["temperature"] | NAN;
+
+    e.detail = attrs["media_title"].as<String>();
+    if (e.detail.isEmpty()) e.detail = attrs["device_class"].as<String>();
+    e.detail = asciiText(e.detail);
+
+    e.available = (e.state != "unavailable");
+    deriveOn(e);
+    return true;
+}
+
+static String escapeHtml(const String& in) {
+    String out;
+    out.reserve(in.length() + 8);
+    for (size_t i = 0; i < in.length(); i++) {
+        char c = in[i];
+        switch (c) {
+            case '&': out += "&amp;"; break;
+            case '<': out += "&lt;"; break;
+            case '>': out += "&gt;"; break;
+            case '"': out += "&quot;"; break;
+            case '\'': out += "&#39;"; break;
+            default: out += c; break;
+        }
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------
+//  HTTP (initial state fetch and service calls)
+// ---------------------------------------------------------------------
+static bool httpRequest(const String& method, const String& path,
+                        const String& body, String& response) {
+    if (!configComplete()) return false;
+
+    String url = g_config.haUrl + path;
+    bool tls = url.startsWith("https://");
+
+    HTTPClient http;
+    WiFiClient plain;
+    WiFiClientSecure secure;
+
+    if (tls) {
+        secure.setInsecure();
+        http.begin(secure, url);
+    } else {
+        http.begin(plain, url);
+    }
+    http.setTimeout(tls ? 4000 : 1200);
+    http.setConnectTimeout(tls ? 4000 : 1200);
+    http.setReuse(false);
+    http.addHeader("Authorization", "Bearer " + g_config.haToken);
+
+    int code;
+    if (method == "GET") {
+        code = http.GET();
+    } else {
+        http.addHeader("Content-Type", "application/json");
+        code = http.POST(body);
+    }
+
+    bool ok = (code >= 200 && code < 300);
+    response = "";
+    if (ok) {
+        response = http.getString();
+    } else if (code < 0) {
+        Serial.printf("[ha] http %s %s -> %d\n", method.c_str(), path.c_str(), code);
+    } else {
+        Serial.printf("[ha] http %s %s -> %d\n", method.c_str(), path.c_str(), code);
+    }
+    http.end();
+    return ok;
+}
+
+bool haFetchState(EntityState& entity) {
+    if (!configComplete() || entity.id.isEmpty()) return false;
+
+    String body;
+    if (!httpRequest("GET", "/api/states/" + entity.id, "", body)) {
+        entity.available = false;
+        return false;
+    }
+
+    JsonDocument doc;
+    if (deserializeJson(doc, body)) {
+        entity.available = false;
+        return false;
+    }
+
+    parseState(entity, doc.as<JsonVariantConst>());
+    return true;
+}
+
+bool haFetchEntityOptions(String& optionsHtml, int maxOptions) {
+    if (!configComplete()) return false;
+
+    String url = g_config.haUrl + "/api/states";
+    bool tls = url.startsWith("https://");
+
+    HTTPClient http;
+    WiFiClient plain;
+    WiFiClientSecure secure;
+    if (tls) {
+        secure.setInsecure();
+        http.begin(secure, url);
+    } else {
+        http.begin(plain, url);
+    }
+    http.setTimeout(tls ? 8000 : 5000);
+    http.setConnectTimeout(tls ? 6000 : 3000);
+    http.setReuse(false);
+    http.addHeader("Authorization", "Bearer " + g_config.haToken);
+
+    int code = http.GET();
+    if (code != 200) {
+        Serial.printf("[ha] entity list -> %d\n", code);
+        http.end();
+        return false;
+    }
+
+    JsonDocument filter;
+    filter[0]["entity_id"] = true;
+    filter[0]["attributes"]["friendly_name"] = true;
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(
+        doc, http.getStream(), DeserializationOption::Filter(filter));
+    http.end();
+
+    if (err) {
+        Serial.printf("[ha] entity list json %s\n", err.c_str());
+        return false;
+    }
+
+    JsonArray array = doc.as<JsonArray>();
+    optionsHtml.reserve(3000);
+    int added = 0;
+    for (JsonObject object : array) {
+        String id = object["entity_id"].as<String>();
+        if (id.isEmpty()) continue;
+        String name = object["attributes"]["friendly_name"].as<String>();
+        if (name.isEmpty()) name = id;
+        optionsHtml += "<option value=\"";
+        optionsHtml += escapeHtml(id);
+        optionsHtml += "\">";
+        optionsHtml += escapeHtml(name);
+        optionsHtml += "</option>";
+        if (++added >= maxOptions) break;
+    }
+    Serial.printf("[ha] entity list loaded=%d\n", added);
+    return added > 0;
+}
+
+bool haCallService(const String& domain, const String& service,
+                   const String& entityId, const String& extraJson) {
+    if (!configComplete() || domain.isEmpty() || service.isEmpty() || entityId.isEmpty()) {
+        return false;
+    }
+
+    String body = "{\"entity_id\":\"" + entityId + "\"";
+    if (!extraJson.isEmpty()) body += "," + extraJson;
+    body += "}";
+
+    String response;
+    bool ok = httpRequest("POST", "/api/services/" + domain + "/" + service, body, response);
+    if (!ok) Serial.printf("[ha] service %s.%s failed\n", domain.c_str(), service.c_str());
+    return ok;
+}
+
+// ---------------------------------------------------------------------
+//  WebSocket
+// ---------------------------------------------------------------------
+static void wsSendJson(JsonDocument& doc) {
+    String out;
+    serializeJson(doc, out);
+    ws.sendTXT(out);
+}
+
+static void wsSubscribe() {
+    JsonDocument doc;
+    doc["id"] = g_wsMessageId++;
+    doc["type"] = "subscribe_events";
+    doc["event_type"] = "state_changed";
+    wsSendJson(doc);
+    Serial.println("[ha] subscribed to state_changed");
+}
+
+static void wsHandleText(const uint8_t* payload, size_t length) {
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, (const char*)payload, length);
+    if (err) return;
+
+    String type = doc["type"].as<String>();
+    if (type == "auth_required") {
+        JsonDocument auth;
+        auth["type"] = "auth";
+        auth["access_token"] = g_config.haToken;
+        wsSendJson(auth);
+        return;
+    }
+
+    if (type == "auth_ok") {
+        g_wsAuthed = true;
+        notifyStatus(true);
+        Serial.println("[ha] ws authenticated");
+        wsSubscribe();
+        if (g_authCb) g_authCb();
+        return;
+    }
+
+    if (type == "auth_invalid") {
+        g_wsAuthed = false;
+        notifyStatus(false);
+        Serial.println("[ha] auth invalid, will retry");
+        ws.disconnect();
+        return;
+    }
+
+    if (type == "event") {
+        String eventType = doc["event"]["event_type"].as<String>();
+        if (eventType != "state_changed") return;
+
+        String entityId = doc["event"]["data"]["entity_id"].as<String>();
+        JsonVariantConst newState = doc["event"]["data"]["new_state"];
+        if (entityId.isEmpty()) return;
+
+        EntityState state;
+        state.id = entityId;
+        parseState(state, newState);
+        if (g_stateCb) g_stateCb(state);
+    }
+}
+
+static void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
+    switch (type) {
+        case WStype_CONNECTED:
+            g_wsAuthed = false;
+            Serial.println("[ha] ws connected");
+            break;
+        case WStype_DISCONNECTED:
+            g_wsAuthed = false;
+            notifyStatus(false);
+            Serial.println("[ha] ws disconnected");
+            break;
+        case WStype_TEXT:
+            wsHandleText(payload, length);
+            break;
+        case WStype_ERROR:
+            Serial.println("[ha] ws error");
+            break;
+        default:
+            break;
+    }
+}
+
+void haBegin() {
+    if (!configComplete()) {
+        Serial.println("[ha] ws not started: missing url or token");
+        return;
+    }
+    if (g_wsStarted) return;
+
+    String url = g_config.haUrl;
+    bool ssl = url.startsWith("https://");
+    int scheme = url.indexOf("://");
+    String rest = (scheme >= 0) ? url.substring(scheme + 3) : url;
+    int slash = rest.indexOf('/');
+    String hostPort = (slash >= 0) ? rest.substring(0, slash) : rest;
+    int colon = hostPort.indexOf(':');
+    String host = (colon >= 0) ? hostPort.substring(0, colon) : hostPort;
+    int port = (colon >= 0) ? hostPort.substring(colon + 1).toInt() : (ssl ? 443 : 80);
+
+    if (host.isEmpty()) {
+        Serial.println("[ha] invalid host");
+        return;
+    }
+
+    ws.onEvent(wsEvent);
+    ws.setReconnectInterval(5000);
+    ws.enableHeartbeat(15000, 3000, 2);
+
+    if (ssl) {
+        ws.beginSSL(host.c_str(), port, "/api/websocket");
+    } else {
+        ws.begin(host.c_str(), port, "/api/websocket");
+    }
+    g_wsStarted = true;
+    Serial.printf("[ha] ws connecting to %s:%d\n", host.c_str(), port);
+}
+
+void haLoop() {
+    if (g_wsStarted) ws.loop();
+}
+
+bool haWsConnected() {
+    return g_wsStarted && g_wsAuthed;
+}
+
+void haSetStateCallback(HaStateCallback cb) {
+    g_stateCb = cb;
+}
+
+void haSetStatusCallback(HaStatusCallback cb) {
+    g_statusCb = cb;
+}
+
+void haSetAuthCallback(HaAuthCallback cb) {
+    g_authCb = cb;
+}
