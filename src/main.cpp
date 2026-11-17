@@ -84,6 +84,10 @@ static wl_status_t g_prevWifiLink = WL_IDLE_STATUS;
 static bool g_cmdMode = false;
 static String g_cmdLine;
 
+static int g_acCursor = 0;
+static bool g_acEditing = false;
+static float g_acDraftTemp = NAN;
+
 static void sfxArrow() {
     M5.Speaker.playWav(sfx_arrow, sfx_arrow_len, 1, -1, true);
 }
@@ -449,13 +453,22 @@ static void drawPageDots(LovyanGFX& g) {
 }
 
 static void drawStatusTitle(LovyanGFX& g) {
-    String title = (g_page < MAX_PAGES) ? g_config.pageTitles[g_page] : String("");
-    if (title.isEmpty()) title = "PAGE" + String(g_page + 1);
+    String title;
+    bool acDetail = g_detail && g_detailGlobal >= 0 &&
+                    g_detailGlobal < g_config.entityCount &&
+                    g_cards[g_detailGlobal].type == EntityType::Climate;
+    if (acDetail) {
+        title = upperText(displayName(g_cards[g_detailGlobal]));
+    } else {
+        title = (g_page < MAX_PAGES) ? g_config.pageTitles[g_page] : String("");
+        if (title.isEmpty()) title = "PAGE" + String(g_page + 1);
+    }
     title = shorten(title, 7);
     txt(g, title.c_str(), 6, 5, TFT_LIGHTGREY, 2);
 }
 
 static void drawStatusCenter(LovyanGFX& g) {
+    if (g_detail) return;
     drawPageDots(g);
 }
 
@@ -508,6 +521,201 @@ static void drawMenu(LovyanGFX& g) {
 // ---------------------------------------------------------------------
 //  Detail view
 // ---------------------------------------------------------------------
+static bool acDetailActive() {
+    return g_detail && g_detailGlobal >= 0 &&
+           g_detailGlobal < g_config.entityCount &&
+           g_cards[g_detailGlobal].type == EntityType::Climate;
+}
+
+static EntityState& acEntity() {
+    return g_cards[g_detailGlobal];
+}
+
+static String modeDisplay(const String& value) {
+    String mode = upperText(value);
+    if (mode == "FAN_ONLY") return String("FAN");
+    if (mode == "HEAT_COOL") return String("HEAT/COOL");
+    return mode;
+}
+
+static bool csvHas(const String& csv, const String& value) {
+    if (csv.isEmpty()) return true;
+    int start = 0;
+    while (start <= (int)csv.length()) {
+        int comma = csv.indexOf(',', start);
+        String item = comma < 0 ? csv.substring(start) : csv.substring(start, comma);
+        item.trim();
+        if (item.equalsIgnoreCase(value)) return true;
+        if (comma < 0) break;
+        start = comma + 1;
+    }
+    return false;
+}
+
+static String nextCsv(const String& csv, const String& current) {
+    String values[12];
+    int count = 0;
+    int start = 0;
+    while (start <= (int)csv.length() && count < 12) {
+        int comma = csv.indexOf(',', start);
+        String item = comma < 0 ? csv.substring(start) : csv.substring(start, comma);
+        item.trim();
+        if (!item.isEmpty()) values[count++] = item;
+        if (comma < 0) break;
+        start = comma + 1;
+    }
+    if (count == 0) return String("");
+    for (int i = 0; i < count; i++) {
+        if (values[i].equalsIgnoreCase(current)) return values[(i + 1) % count];
+    }
+    return values[0];
+}
+
+static String acModeCycle(const EntityState& e, int index) {
+    uint8_t mask = (index >= 0 && index < MAX_ENTITIES)
+                       ? g_config.climateModes[index]
+                       : 0;
+    String list = "off";
+    auto add = [&](uint8_t bit, const char* mode) {
+        if ((mask & bit) && csvHas(e.hvacModes, mode)) {
+            list += ",";
+            list += mode;
+        }
+    };
+    add(CLIMATE_COOL, "cool");
+    add(CLIMATE_HEAT, "heat");
+    add(CLIMATE_DRY, "dry");
+    add(CLIMATE_FAN, "fan_only");
+    add(CLIMATE_AUTO, "auto");
+    return list;
+}
+
+static String acModeText(const EntityState& e) {
+    if (!e.available) return "--";
+    return modeDisplay(e.state);
+}
+
+static String acDisplayModeValue(String value) {
+    value = upperText(value);
+    value.replace("_", " ");
+    return value;
+}
+
+static String acFanText(const EntityState& e) {
+    if (!e.available || e.fanMode.isEmpty()) return "--";
+    return acDisplayModeValue(e.fanMode);
+}
+
+static String acSwingText(const EntityState& e) {
+    if (!e.available || e.swingMode.isEmpty()) return "--";
+    return acDisplayModeValue(e.swingMode);
+}
+
+static String acActionText(const EntityState& e) {
+    if (!e.available) return "--";
+    String action = e.hvacAction.isEmpty() ? e.state : e.hvacAction;
+    if (action.isEmpty()) return "--";
+    return acDisplayModeValue(action);
+}
+
+static String acAuxText(const EntityState& e) {
+    if (e.aux.id.isEmpty() || !e.aux.available) return "--";
+    switch (e.aux.type) {
+        case EntityType::Light:
+        case EntityType::Switch:
+            return e.aux.on ? String("ON") : String("OFF");
+        case EntityType::Scene:
+            return String("SCENE");
+        case EntityType::Media:
+        case EntityType::Cover:
+            return upperText(e.aux.state);
+        case EntityType::Sensor: {
+            String value = e.aux.state;
+            if (!e.aux.unit.isEmpty()) value += " " + e.aux.unit;
+            return value;
+        }
+        default:
+            return e.aux.state.isEmpty() ? String("--") : upperText(e.aux.state);
+    }
+}
+
+static String acAuxLabel(const EntityState& e, int index) {
+    if (e.aux.id.isEmpty()) return String("");
+    String label = (index >= 0 && index < MAX_ENTITIES)
+                       ? g_config.auxNames[index]
+                       : String("");
+    if (label.isEmpty()) label = e.aux.name;
+    if (label.isEmpty()) label = "AUX";
+    return shorten(upperText(label), 12);
+}
+
+static String acTempText(const EntityState& e, bool editing) {
+    if (editing && validTemp(g_acDraftTemp)) return tempText(g_acDraftTemp);
+    if (validTemp(e.target)) return tempText(e.target);
+    return String("--");
+}
+
+static String acCurrentText(const EntityState& e) {
+    return validTemp(e.current) ? tempText(e.current) : String("--");
+}
+
+static void drawAcRow(LovyanGFX& g, int slot, const String& label,
+                      const String& value, bool selected, bool editing) {
+    int y = MENU_Y + slot * MENU_ROW_H;
+    uint16_t bg = editing ? TFT_MAROON : (selected ? TFT_NAVY : TFT_BLACK);
+    g.fillRect(0, y, SCR_W, MENU_ROW_H, bg);
+
+    uint16_t numberBg = editing ? TFT_MAROON : (selected ? C_GREEN : 0x2104);
+    uint16_t numberFg = editing ? C_YELLOW : (selected ? TFT_BLACK : TFT_WHITE);
+    g.fillRect(0, y, 24, MENU_ROW_H, numberBg);
+
+    char number[2] = { char('1' + slot), 0 };
+    txt(g, number, 6, y + 5, numberFg, 2);
+
+    if (slot < GRID_SLOTS - 1) {
+        g.drawFastHLine(0, y + MENU_ROW_H - 1, SCR_W, C_DIVIDER);
+    }
+
+    uint16_t labelColor = editing ? C_YELLOW : (selected ? C_GREEN : TFT_WHITE);
+    uint16_t valueColor = editing ? C_YELLOW : (selected ? C_GREEN : TFT_LIGHTGREY);
+    txt(g, label.c_str(), 32, y + 5, labelColor, 2);
+    txtR(g, value.c_str(), 314, y + 5, valueColor, 2);
+}
+
+static String acLabelFor(const EntityState& e, int index, int slot) {
+    switch (slot) {
+        case 0: return "MODE";
+        case 1: return "TEMP";
+        case 2: return "FAN";
+        case 3: return "SWING";
+        case 4: return "ACTION";
+        case 5: return acAuxLabel(e, index);
+        case 6: return "CURRENT";
+        default: return "BACK";
+    }
+}
+
+static String acValueFor(const EntityState& e, int slot) {
+    switch (slot) {
+        case 0: return acModeText(e);
+        case 1: return acTempText(e, g_acEditing);
+        case 2: return acFanText(e);
+        case 3: return acSwingText(e);
+        case 4: return acActionText(e);
+        case 5: return acAuxText(e);
+        case 6: return acCurrentText(e);
+        default: return "";
+    }
+}
+
+static void drawAcDetail(LovyanGFX& g, const EntityState& e) {
+    for (int i = 0; i < 8; i++) {
+        drawAcRow(g, i, acLabelFor(e, g_detailGlobal, i),
+                  acValueFor(e, i), i == g_acCursor,
+                  i == 1 && g_acEditing);
+    }
+}
+
 static String detailValue(const EntityState& e) {
     if (!e.available) return String("--");
     switch (e.type) {
@@ -616,7 +824,8 @@ static void renderAll(LovyanGFX& g) {
     drawStatusBar(g);
 
     if (g_detail && g_detailGlobal >= 0) {
-        drawDetail(g, g_cards[g_detailGlobal]);
+        if (acDetailActive()) drawAcDetail(g, g_cards[g_detailGlobal]);
+        else drawDetail(g, g_cards[g_detailGlobal]);
     } else {
         drawMenu(g);
     }
@@ -633,7 +842,8 @@ static void redrawContent() {
     M5.Display.startWrite();
     M5.Display.fillRect(0, SB_H, SCR_W, SCR_H - SB_H, C_BG);
     if (g_detail && g_detailGlobal >= 0) {
-        drawDetail(M5.Display, g_cards[g_detailGlobal]);
+        if (acDetailActive()) drawAcDetail(M5.Display, g_cards[g_detailGlobal]);
+        else drawDetail(M5.Display, g_cards[g_detailGlobal]);
     } else {
         drawMenu(M5.Display);
     }
@@ -654,6 +864,28 @@ static void redrawDetail() {
     M5.Display.fillRect(0, SB_H, SCR_W, 39, C_BG);
     drawDetailHeader(M5.Display, g_cards[g_detailGlobal]);
     drawDetailPanel(M5.Display, g_cards[g_detailGlobal]);
+    M5.Display.endWrite();
+}
+
+static void redrawAcDetail() {
+    if (!acDetailActive()) return;
+    EntityState& e = acEntity();
+    M5.Display.startWrite();
+    for (int i = 0; i < 8; i++) {
+        drawAcRow(M5.Display, i, acLabelFor(e, g_detailGlobal, i),
+                  acValueFor(e, i), i == g_acCursor,
+                  i == 1 && g_acEditing);
+    }
+    M5.Display.endWrite();
+}
+
+static void redrawAcRow(int slot) {
+    if (!acDetailActive()) return;
+    EntityState& e = acEntity();
+    M5.Display.startWrite();
+    drawAcRow(M5.Display, slot, acLabelFor(e, g_detailGlobal, slot),
+              acValueFor(e, slot), slot == g_acCursor,
+              slot == 1 && g_acEditing);
     M5.Display.endWrite();
 }
 
@@ -699,7 +931,10 @@ static void renderDirty() {
     if (g_detail) {
         bool detailDirty = (g_detailGlobal >= 0 && g_dirty[g_detailGlobal]);
         for (int i = 0; i < MAX_ENTITIES; i++) g_dirty[i] = false;
-        if (detailDirty) redrawDetail();
+        if (detailDirty) {
+            if (acDetailActive()) redrawAcDetail();
+            else redrawDetail();
+        }
         redrawStatusRegions();
         return;
     }
@@ -722,11 +957,32 @@ static void renderDirty() {
 // ---------------------------------------------------------------------
 static void onHaState(const EntityState& state) {
     for (int i = 0; i < g_config.entityCount; i++) {
-        if (g_cards[i].id == state.id) {
-            String custom = g_cards[i].customName;
-            g_cards[i] = state;
-            g_cards[i].customName = custom;
-            if (!custom.isEmpty()) g_cards[i].name = custom;
+        EntityState& card = g_cards[i];
+        if (card.id == state.id) {
+            AuxEntity aux = card.aux;
+            String custom = card.customName;
+            card = state;
+            card.aux = aux;
+            card.customName = custom;
+            if (!custom.isEmpty()) card.name = custom;
+            if (i / GRID_SLOTS == g_page || (g_detail && i == g_detailGlobal)) {
+                g_dirty[i] = true;
+            }
+            if (!g_haOnline) {
+                g_haOnline = true;
+                g_statusLinkDirty = true;
+            }
+            return;
+        }
+        if (!card.aux.id.isEmpty() && card.aux.id == state.id) {
+            card.aux.name = state.name;
+            card.aux.state = state.state;
+            card.aux.unit = state.unit;
+            card.aux.detail = state.detail;
+            card.aux.type = state.type;
+            card.aux.on = state.on;
+            card.aux.available = state.available;
+            card.aux.brightness = state.brightness;
             if (i / GRID_SLOTS == g_page || (g_detail && i == g_detailGlobal)) {
                 g_dirty[i] = true;
             }
@@ -764,7 +1020,11 @@ static void scheduleRefresh() {
 static void goBack() {
     if (g_detail) {
         g_detail = false;
+        g_acEditing = false;
+        g_statusTitleDirty = true;
+        g_statusCenterDirty = true;
         redrawContent();
+        redrawStatusRegions();
         sfxArrow();
     }
 }
@@ -774,7 +1034,13 @@ static void openDetail() {
     if (cardAt(g_focus).id.isEmpty()) return;
     g_detail = true;
     g_detailGlobal = globalSlot(g_focus);
+    g_acCursor = 0;
+    g_acEditing = false;
+    g_acDraftTemp = NAN;
+    g_statusTitleDirty = true;
+    g_statusCenterDirty = true;
     redrawContent();
+    redrawStatusRegions();
     sfxSelect();
 }
 
@@ -816,9 +1082,168 @@ static bool callService(const String& domain, const String& service,
     return ok;
 }
 
+static void acMove(int delta) {
+    if (!acDetailActive()) return;
+    EntityState& e = acEntity();
+    int next = g_acCursor;
+    for (int step = 0; step < 8; step++) {
+        next = (next + delta + 8) % 8;
+        if (next == g_acCursor) return;
+        if (next == 5 && e.aux.id.isEmpty()) continue;
+        int old = g_acCursor;
+        g_acCursor = next;
+        g_acEditing = false;
+        redrawAcRow(old);
+        redrawAcRow(next);
+        sfxArrow();
+        return;
+    }
+}
+
+static void acAdjust(int delta) {
+    if (!acDetailActive() || !g_acEditing) return;
+    EntityState& e = acEntity();
+    float base = validTemp(g_acDraftTemp) ? g_acDraftTemp
+                                          : (validTemp(e.target) ? e.target : 24.0f);
+    g_acDraftTemp = constrain(base + delta * e.tempStep, e.minTemp, e.maxTemp);
+    redrawAcRow(1);
+    sfxArrow();
+}
+
+static void acNextMode() {
+    EntityState& e = acEntity();
+    String list = acModeCycle(e, g_detailGlobal);
+    String next = nextCsv(list, e.state);
+    if (next.isEmpty() || next.equalsIgnoreCase(e.state)) return;
+    bool ok = callService("climate", "set_hvac_mode", e.id,
+                          "\"hvac_mode\":\"" + next + "\"");
+    if (ok) {
+        e.state = next;
+        e.on = (next != "off");
+        e.available = true;
+        redrawAcDetail();
+        scheduleRefresh();
+        sfxSelect();
+    }
+}
+
+static void acCycleFan() {
+    EntityState& e = acEntity();
+    if (e.fanModes.isEmpty()) return;
+    String next = nextCsv(e.fanModes, e.fanMode);
+    if (next.isEmpty()) return;
+    bool ok = callService("climate", "set_fan_mode", e.id,
+                          "\"fan_mode\":\"" + next + "\"");
+    if (ok) {
+        e.fanMode = next;
+        redrawAcRow(2);
+        scheduleRefresh();
+        sfxSelect();
+    }
+}
+
+static void acCycleSwing() {
+    EntityState& e = acEntity();
+    if (e.swingModes.isEmpty()) return;
+    String next = nextCsv(e.swingModes, e.swingMode);
+    if (next.isEmpty()) return;
+    bool ok = callService("climate", "set_swing_mode", e.id,
+                          "\"swing_mode\":\"" + next + "\"");
+    if (ok) {
+        e.swingMode = next;
+        redrawAcRow(3);
+        scheduleRefresh();
+        sfxSelect();
+    }
+}
+
+static void acAuxAction() {
+    EntityState& e = acEntity();
+    if (e.aux.id.isEmpty()) return;
+    bool ok = false;
+    String domain = entityDomain(e.aux.id);
+    switch (e.aux.type) {
+        case EntityType::Light:
+            ok = callService(domain, "toggle", e.aux.id);
+            if (ok) {
+                e.aux.on = !e.aux.on;
+                e.aux.state = e.aux.on ? "on" : "off";
+            }
+            break;
+        case EntityType::Switch:
+            ok = callService("homeassistant", "toggle", e.aux.id);
+            if (ok) {
+                e.aux.on = !e.aux.on;
+                e.aux.state = e.aux.on ? "on" : "off";
+            }
+            break;
+        case EntityType::Scene:
+            ok = callService(domain, "turn_on", e.aux.id);
+            break;
+        case EntityType::Media:
+            ok = callService(domain, "media_play_pause", e.aux.id);
+            break;
+        case EntityType::Cover:
+            ok = callService(domain, "toggle", e.aux.id);
+            break;
+        default:
+            return;
+    }
+    if (ok) {
+        redrawAcRow(5);
+        scheduleRefresh();
+        sfxSelect();
+    }
+}
+
+static void acTempAction() {
+    EntityState& e = acEntity();
+    if (!g_acEditing) {
+        g_acEditing = true;
+        g_acDraftTemp = validTemp(e.target) ? e.target
+                                           : (validTemp(e.current) ? e.current : 24.0f);
+        g_acDraftTemp = constrain(g_acDraftTemp, e.minTemp, e.maxTemp);
+        redrawAcRow(1);
+        sfxSelect();
+        return;
+    }
+
+    float value = constrain(g_acDraftTemp, e.minTemp, e.maxTemp);
+    char extra[40];
+    snprintf(extra, sizeof(extra), "\"temperature\":%.1f", value);
+    bool ok = callService("climate", "set_temperature", e.id, extra);
+    if (ok) {
+        e.target = value;
+        e.on = true;
+        g_acEditing = false;
+        redrawAcDetail();
+        scheduleRefresh();
+        sfxSelect();
+    }
+}
+
+static void acAction() {
+    if (!acDetailActive()) return;
+    if (g_acEditing) {
+        acTempAction();
+        return;
+    }
+    switch (g_acCursor) {
+        case 0: acNextMode(); break;
+        case 1: acTempAction(); break;
+        case 2: acCycleFan(); break;
+        case 3: acCycleSwing(); break;
+        case 4: break;
+        case 5: acAuxAction(); break;
+        case 6: break;
+        case 7: goBack(); break;
+    }
+}
+
 static void primaryAction() {
     if (g_detail) {
-        goBack();
+        if (acDetailActive()) acAction();
+        else goBack();
         return;
     }
 
@@ -941,6 +1366,38 @@ static void directSelect(int idx) {
 // ---------------------------------------------------------------------
 static void handleKey(char c) {
     noteActivity();
+
+    if (acDetailActive()) {
+        switch (c) {
+            case 'w': case 'a': acMove(-1); break;
+            case 's': case 'd': acMove(+1); break;
+            case 'e': case '=': case '\r': acAction(); break;
+            case '+': acAdjust(+1); break;
+            case '-': acAdjust(-1); break;
+            case '0': case 'b': case 'A':
+                if (g_acEditing) {
+                    g_acEditing = false;
+                    redrawAcRow(1);
+                } else {
+                    goBack();
+                }
+                break;
+            default:
+                if (c >= '1' && c <= '8') {
+                    int slot = c - '1';
+                    if (slot == 5 && acEntity().aux.id.isEmpty()) break;
+                    int old = g_acCursor;
+                    g_acCursor = slot;
+                    g_acEditing = false;
+                    redrawAcRow(old);
+                    redrawAcRow(slot);
+                    sfxArrow();
+                }
+                break;
+        }
+        return;
+    }
+
     switch (c) {
         case 'w': case 'a': moveFocus(-1); break;
         case 's': case 'd': moveFocus(+1); break;
@@ -969,8 +1426,14 @@ static void handleButtons() {
     }
     if (M5.BtnA.wasReleased()) {
         if (aHeld) {
-            if (g_detail) adjustSelected(-1);
-            else moveFocus(-1);
+            if (acDetailActive()) {
+                if (g_acEditing) acAdjust(-1);
+                else acMove(-1);
+            } else if (g_detail) {
+                adjustSelected(-1);
+            } else {
+                moveFocus(-1);
+            }
         }
         aHeld = false;
     }
@@ -982,15 +1445,30 @@ static void handleButtons() {
     }
     if (M5.BtnC.wasReleased()) {
         if (cHeld) {
-            if (g_detail) adjustSelected(+1);
-            else moveFocus(+1);
+            if (acDetailActive()) {
+                if (g_acEditing) acAdjust(+1);
+                else acMove(+1);
+            } else if (g_detail) {
+                adjustSelected(+1);
+            } else {
+                moveFocus(+1);
+            }
         }
         cHeld = false;
     }
 
     if (M5.BtnB.wasPressed()) bHeld = true;
     if (bHeld && M5.BtnB.pressedFor(600)) {
-        if (!g_detail) openDetail();
+        if (g_detail) {
+            if (acDetailActive() && g_acEditing) {
+                g_acEditing = false;
+                redrawAcRow(1);
+            } else {
+                goBack();
+            }
+        } else {
+            openDetail();
+        }
         bHeld = false;
     }
     if (M5.BtnB.wasReleased()) {
@@ -1071,6 +1549,20 @@ static void refreshTick() {
             }
             if (!g_cards[index].customName.isEmpty()) {
                 g_cards[index].name = g_cards[index].customName;
+            }
+            if (!g_cards[index].aux.id.isEmpty()) {
+                EntityState auxState;
+                auxState.id = g_cards[index].aux.id;
+                if (haFetchState(auxState)) {
+                    g_cards[index].aux.name = auxState.name;
+                    g_cards[index].aux.state = auxState.state;
+                    g_cards[index].aux.unit = auxState.unit;
+                    g_cards[index].aux.detail = auxState.detail;
+                    g_cards[index].aux.type = auxState.type;
+                    g_cards[index].aux.on = auxState.on;
+                    g_cards[index].aux.available = auxState.available;
+                    g_cards[index].aux.brightness = auxState.brightness;
+                }
             }
             // Cache every page, redraw only rows on the visible page.
             if (index / GRID_SLOTS == g_page) {
@@ -1163,6 +1655,12 @@ void setup() {
                                   ? defaultNameFromId(g_cards[i].id)
                                   : g_cards[i].customName;
             g_cards[i].state = "--";
+            g_cards[i].aux.id = g_config.auxEntities[i];
+            if (!g_cards[i].aux.id.isEmpty()) {
+                g_cards[i].aux.type = entityTypeFromId(g_cards[i].aux.id);
+                g_cards[i].aux.name = defaultNameFromId(g_cards[i].aux.id);
+                g_cards[i].aux.state = "--";
+            }
         }
     }
 

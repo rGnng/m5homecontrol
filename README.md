@@ -118,7 +118,9 @@ The entity list is cached for 60 seconds.
 Fields:
 
 - Brightness, 1-100%, default 30%
-- Dynamic page blocks: title + eight slots, each with entity ID and optional display name, with add/remove page
+- Dynamic page blocks: title + eight slots
+- Each slot: entity ID, display name, optional AUX entity, optional AUX name
+- Climate slots: checkboxes for allowed MODE values (COOL/HEAT/DRY/FAN/AUTO)
 - Wi-Fi SSID and password
 - Home Assistant base URL
 - Long-lived access token
@@ -154,8 +156,33 @@ and empty pages are kept as configured.
 | B | run the focused entity |
 | B long press | open detail view |
 | 1-8 | direct hotkey for the current page |
-| A / C in detail | brightness or target temperature |
-| B in detail | back |
+| A / C in non-AC detail | brightness or target temperature |
+| B in non-AC detail | back |
+
+## AC detail
+
+Long press B on a `climate.*` row opens an eight-row detail menu:
+
+```
+1  MODE       COOL
+2  TEMP       24.0C
+3  FAN        AUTO
+4  SWING      OFF
+5  ACTION     COOLING
+6  <AUX name> ON
+7  CURRENT    27.5C
+8  BACK
+```
+
+- MODE cycles OFF plus the allowed, HA-supported modes configured in the web UI
+- TEMP enters edit mode: A/C change by `target_temp_step`, B confirms, long B cancels
+- FAN and SWING cycle the HA `fan_modes` / `swing_modes`
+- ACTION and CURRENT are read-only
+- AUX is any configured entity: switches/lights toggle, scenes run, sensors are read-only
+- The AUX row uses the configured AUX display name
+- Rows use uppercase text; only the affected row redraws
+- The status bar shows the AC display name and hides page squares
+- Missing values show `--`
 
 Serial developer keys: `1-8`, `w`/`s` focus, `p`/`n` page, `e`/Enter action,
 `0` back, `M` detail, `+`/`-` adjust.

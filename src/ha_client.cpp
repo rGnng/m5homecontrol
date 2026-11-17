@@ -97,6 +97,16 @@ static void deriveOn(EntityState& e) {
     }
 }
 
+static String joinArray(JsonVariantConst value) {
+    if (!value.is<JsonArrayConst>()) return String("");
+    String out;
+    for (JsonVariantConst item : value.as<JsonArrayConst>()) {
+        if (!out.isEmpty()) out += ",";
+        out += item.as<String>();
+    }
+    return out;
+}
+
 static bool parseState(EntityState& e, JsonVariantConst obj) {
     if (obj.isNull()) {
         e.state = "unavailable";
@@ -116,6 +126,19 @@ static bool parseState(EntityState& e, JsonVariantConst obj) {
     e.brightness = attrs["brightness"] | -1;
     e.current = attrs["current_temperature"] | NAN;
     e.target = attrs["temperature"] | NAN;
+
+    e.hvacAction = attrs["hvac_action"].as<String>();
+    e.hvacModes = joinArray(attrs["hvac_modes"]);
+    e.fanModes = joinArray(attrs["fan_modes"]);
+    e.swingModes = joinArray(attrs["swing_modes"]);
+    e.fanMode = attrs["fan_mode"].as<String>();
+    e.swingMode = attrs["swing_mode"].as<String>();
+    e.presetModes = joinArray(attrs["preset_modes"]);
+    e.presetMode = attrs["preset_mode"].as<String>();
+    e.minTemp = attrs["min_temp"] | 16.0f;
+    e.maxTemp = attrs["max_temp"] | 30.0f;
+    e.tempStep = attrs["target_temp_step"] | 0.5f;
+    if (e.tempStep <= 0.0f) e.tempStep = 0.5f;
 
     e.detail = attrs["media_title"].as<String>();
     if (e.detail.isEmpty()) e.detail = attrs["device_class"].as<String>();

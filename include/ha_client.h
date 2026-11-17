@@ -13,6 +13,18 @@ enum class EntityType : uint8_t {
     Cover,
 };
 
+struct AuxEntity {
+    String id;
+    String name;
+    String state;
+    String unit;
+    String detail;
+    EntityType type = EntityType::Unknown;
+    bool on = false;
+    bool available = false;
+    int brightness = -1;
+};
+
 struct EntityState {
     String id;
     String name;
@@ -26,6 +38,20 @@ struct EntityState {
     int brightness = -1;
     float current = NAN;
     float target = NAN;
+
+    String hvacAction;
+    String hvacModes;
+    String fanModes;
+    String swingModes;
+    String fanMode;
+    String swingMode;
+    String presetModes;
+    String presetMode;
+    float minTemp = 16.0f;
+    float maxTemp = 30.0f;
+    float tempStep = 0.5f;
+
+    AuxEntity aux;
 };
 
 typedef void (*HaStateCallback)(const EntityState& state);

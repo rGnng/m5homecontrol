@@ -35,6 +35,15 @@ void configLoad() {
     for (int i = 0; i < MAX_ENTITIES; i++) {
         g_config.entities[i] = p.getString(("e" + String(i)).c_str(), "");
         g_config.entityNames[i] = p.getString(("n" + String(i)).c_str(), "");
+        g_config.auxEntities[i] = p.getString(("x" + String(i)).c_str(), "");
+        g_config.auxNames[i] = p.getString(("y" + String(i)).c_str(), "");
+        int mask = p.getInt(("cm" + String(i)).c_str(), -1);
+        if (mask < 0) {
+            mask = g_config.entities[i].startsWith("climate.")
+                       ? (CLIMATE_COOL | CLIMATE_HEAT | CLIMATE_DRY)
+                       : 0;
+        }
+        g_config.climateModes[i] = (uint8_t)(mask & 0x1F);
     }
     int pages = p.getInt("pages", -1);
     if (pages < 0) {
@@ -53,6 +62,9 @@ void configLoad() {
     for (int i = g_config.entityCount; i < MAX_ENTITIES; i++) {
         g_config.entities[i] = "";
         g_config.entityNames[i] = "";
+        g_config.auxEntities[i] = "";
+        g_config.auxNames[i] = "";
+        g_config.climateModes[i] = 0;
     }
     for (int page = 0; page < MAX_PAGES; page++) {
         g_config.pageTitles[page] =
@@ -106,12 +118,16 @@ bool configSave() {
     for (int i = 0; i < g_config.entityCount; i++) {
         putStringKey(("e" + String(i)).c_str(), g_config.entities[i]);
         putStringKey(("n" + String(i)).c_str(), g_config.entityNames[i]);
+        putStringKey(("x" + String(i)).c_str(), g_config.auxEntities[i]);
+        putStringKey(("y" + String(i)).c_str(), g_config.auxNames[i]);
+        putIntKey(("cm" + String(i)).c_str(), g_config.climateModes[i]);
     }
     for (int i = g_config.entityCount; i < MAX_ENTITIES; i++) {
-        String ek = "e" + String(i);
-        String nk = "n" + String(i);
-        if (p.isKey(ek.c_str())) p.remove(ek.c_str());
-        if (p.isKey(nk.c_str())) p.remove(nk.c_str());
+        const char* keys[] = {"e", "n", "x", "y", "cm"};
+        for (const char* prefix : keys) {
+            String key = String(prefix) + String(i);
+            if (p.isKey(key.c_str())) p.remove(key.c_str());
+        }
     }
     for (int page = 0; page < g_config.pageCount; page++) {
         putStringKey(("t" + String(page)).c_str(), g_config.pageTitles[page]);
@@ -203,6 +219,9 @@ static String htmlHeader(const String& title) {
     h += "table{width:100%;border-collapse:collapse}td{padding:4px 0;vertical-align:top}";
     h += "td.n{width:28px;color:#777;padding-top:12px}code{background:#1a1a1a;color:#eee;padding:1px 4px}";
     h += "th{text-align:left;font-size:12px;color:#888;font-weight:600;padding:4px 0}";
+    h += ".modesrow td{padding:0 0 10px}.modelabel{font-size:12px;color:#888;margin-right:8px}";
+    h += "label.inline{display:inline-flex;align-items:center;gap:4px;margin:0 10px 0 0;font-size:12px;color:#aaa}";
+    h += "label.inline input{width:auto;margin:0}";
     h += ".pagehead{font-weight:600;margin:18px 0 6px;color:#fff}";
     h += ".status{border-left:3px solid #eee;padding:8px 10px;background:#111;margin:0 0 14px;color:#bbb}";
     h += ".actions{display:flex;align-items:center;gap:12px;margin:8px 0 24px}";
@@ -330,7 +349,8 @@ static void handleRoot() {
         page += "<label>Title</label><input class=\"ptitle\" name=\"t" + String(p) +
                 "\" value=\"" + htmlEscape(g_config.pageTitles[p]) + "\">";
         page += "<table><tbody>";
-        page += "<tr><th></th><th>Entity ID</th><th>Display name</th></tr>";
+        page += "<tr><th></th><th>Entity ID</th><th>Display name</th>"
+                "<th>AUX entity</th><th>AUX name</th></tr>";
         for (int slot = 0; slot < GRID_SLOTS; slot++) {
             int index = p * GRID_SLOTS + slot;
             String value = index < g_config.entityCount
@@ -339,7 +359,18 @@ static void handleRoot() {
             String name = index < g_config.entityCount
                               ? g_config.entityNames[index]
                               : String("");
-            page += "<tr><td class=\"n\">" + String(slot + 1) + "</td><td>";
+            String aux = index < g_config.entityCount
+                             ? g_config.auxEntities[index]
+                             : String("");
+            String auxName = index < g_config.entityCount
+                                 ? g_config.auxNames[index]
+                                 : String("");
+            uint8_t mask = index < g_config.entityCount
+                               ? g_config.climateModes[index]
+                               : 0;
+            bool climate = value.startsWith("climate.");
+
+            page += "<tr class=\"slotrow\"><td class=\"n\">" + String(slot + 1) + "</td><td>";
             page += "<input class=\"entity\" name=\"e" + String(index) +
                     "\" list=\"entity-list\" value=\"" + htmlEscape(value) +
                     "\" placeholder=\"light.living_room\">";
@@ -347,6 +378,29 @@ static void handleRoot() {
             page += "<input class=\"ename\" name=\"n" + String(index) +
                     "\" value=\"" + htmlEscape(name) +
                     "\" placeholder=\"optional name\">";
+            page += "</td><td>";
+            page += "<input class=\"auxentity\" name=\"x" + String(index) +
+                    "\" list=\"entity-list\" value=\"" + htmlEscape(aux) +
+                    "\" placeholder=\"optional entity\">";
+            page += "</td><td>";
+            page += "<input class=\"auxname\" name=\"y" + String(index) +
+                    "\" value=\"" + htmlEscape(auxName) +
+                    "\" placeholder=\"optional name\">";
+            page += "</td></tr>";
+
+            page += "<tr class=\"modesrow\" style=\"display:" +
+                    String(climate ? "" : "none") + "\"><td></td><td colspan=\"4\">";
+            page += "<span class=\"modelabel\">MODES</span>";
+            const char* codes[] = {"c", "h", "d", "f", "a"};
+            const char* labels[] = {"COOL", "HEAT", "DRY", "FAN", "AUTO"};
+            const uint8_t bits[] = {CLIMATE_COOL, CLIMATE_HEAT, CLIMATE_DRY,
+                                    CLIMATE_FAN, CLIMATE_AUTO};
+            for (int m = 0; m < 5; m++) {
+                page += "<label class=\"inline\"><input type=\"checkbox\" data-code=\"" +
+                        String(codes[m]) + "\" name=\"m" + String(index) + codes[m] +
+                        "\"" + ((mask & bits[m]) ? " checked" : "") + "> " +
+                        labels[m] + "</label>";
+            }
             page += "</td></tr>";
         }
         page += "</tbody></table></div>";
@@ -382,27 +436,64 @@ static void handleRoot() {
 <script>
 const MAX_PAGES = )JS") + String(MAX_PAGES) + R"JS(;
 const SLOTS = )JS" + String(GRID_SLOTS) + R"JS(;
+function updateModesRow(row) {
+  const entity = row.querySelector('.entity').value.trim();
+  const modesRow = row.nextElementSibling;
+  if (modesRow && modesRow.classList.contains('modesrow')) {
+    modesRow.style.display = entity.startsWith('climate.') ? '' : 'none';
+  }
+}
+function bindRows() {
+  document.querySelectorAll('#pages .slotrow').forEach(function(row) {
+    const input = row.querySelector('.entity');
+    if (!input.dataset.bound) {
+      input.dataset.bound = '1';
+      input.addEventListener('input', function() { updateModesRow(row); });
+    }
+    updateModesRow(row);
+  });
+}
 function renumberPages() {
   const blocks = document.querySelectorAll('#pages .pageblock');
-  blocks.forEach((block, p) => {
+  blocks.forEach(function(block, p) {
     block.querySelector('.pagehead span').textContent = 'Page ' + (p + 1);
     block.querySelector('.ptitle').name = 't' + p;
-    block.querySelectorAll('.entity').forEach((input, slot) => {
-      input.name = 'e' + (p * SLOTS + slot);
-    });
-    block.querySelectorAll('.ename').forEach((input, slot) => {
-      input.name = 'n' + (p * SLOTS + slot);
+    block.querySelectorAll('.slotrow').forEach(function(row, slot) {
+      const idx = p * SLOTS + slot;
+      row.querySelector('.entity').name = 'e' + idx;
+      row.querySelector('.ename').name = 'n' + idx;
+      row.querySelector('.auxentity').name = 'x' + idx;
+      row.querySelector('.auxname').name = 'y' + idx;
+      const modesRow = row.nextElementSibling;
+      if (modesRow && modesRow.classList.contains('modesrow')) {
+        modesRow.querySelectorAll('input[type=checkbox]').forEach(function(cb) {
+          cb.name = 'm' + idx + cb.dataset.code;
+        });
+      }
     });
   });
   document.getElementById('pagecount').value = blocks.length;
   document.getElementById('add-page').disabled = blocks.length >= MAX_PAGES;
+  bindRows();
 }
 function addPage() {
   const blocks = document.querySelectorAll('#pages .pageblock');
   if (blocks.length >= MAX_PAGES) return;
   let rows = '';
   for (let slot = 0; slot < SLOTS; slot++) {
-    rows += '<tr><td class="n">' + (slot + 1) + '</td><td><input class="entity" list="entity-list" placeholder="light.living_room"></td><td><input class="ename" placeholder="optional name"></td></tr>';
+    rows += '<tr class="slotrow"><td class="n">' + (slot + 1) + '</td>' +
+      '<td><input class="entity" list="entity-list" placeholder="light.living_room"></td>' +
+      '<td><input class="ename" placeholder="optional name"></td>' +
+      '<td><input class="auxentity" list="entity-list" placeholder="optional entity"></td>' +
+      '<td><input class="auxname" placeholder="optional name"></td></tr>' +
+      '<tr class="modesrow" style="display:none"><td></td><td colspan="4">' +
+      '<span class="modelabel">MODES</span>' +
+      '<label class="inline"><input type="checkbox" data-code="c" checked> COOL</label>' +
+      '<label class="inline"><input type="checkbox" data-code="h" checked> HEAT</label>' +
+      '<label class="inline"><input type="checkbox" data-code="d" checked> DRY</label>' +
+      '<label class="inline"><input type="checkbox" data-code="f"> FAN</label>' +
+      '<label class="inline"><input type="checkbox" data-code="a"> AUTO</label>' +
+      '</td></tr>';
   }
   const block = document.createElement('div');
   block.className = 'pageblock';
@@ -540,9 +631,32 @@ static void handleSave() {
             String name = server.arg("n" + String(i));
             name.trim();
             g_config.entityNames[i] = name;
+
+            String aux = server.arg("x" + String(i));
+            aux.trim();
+            aux.toLowerCase();
+            g_config.auxEntities[i] = aux;
+
+            String auxName = server.arg("y" + String(i));
+            auxName.trim();
+            g_config.auxNames[i] = aux.isEmpty() ? String("") : auxName;
+
+            uint8_t mask = 0;
+            if (value.startsWith("climate.")) {
+                if (server.hasArg("m" + String(i) + "c")) mask |= CLIMATE_COOL;
+                if (server.hasArg("m" + String(i) + "h")) mask |= CLIMATE_HEAT;
+                if (server.hasArg("m" + String(i) + "d")) mask |= CLIMATE_DRY;
+                if (server.hasArg("m" + String(i) + "f")) mask |= CLIMATE_FAN;
+                if (server.hasArg("m" + String(i) + "a")) mask |= CLIMATE_AUTO;
+                if (mask == 0) mask = CLIMATE_COOL | CLIMATE_HEAT | CLIMATE_DRY;
+            }
+            g_config.climateModes[i] = mask;
         } else {
             g_config.entities[i] = "";
             g_config.entityNames[i] = "";
+            g_config.auxEntities[i] = "";
+            g_config.auxNames[i] = "";
+            g_config.climateModes[i] = 0;
         }
     }
 
