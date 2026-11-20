@@ -5,7 +5,6 @@
 
 #include <M5Unified.h>
 #include <WiFi.h>
-#include <ArduinoOTA.h>
 #include <time.h>
 #include <math.h>
 #include <esp_heap_caps.h>
@@ -16,6 +15,7 @@
 #include <utility/led/LED_Strip_Class.hpp>
 
 #include "app_config.h"
+#include "backlight_schedule.h"
 #include "power_status.h"
 #include "side_led_bus.h"
 #include "ha_client.h"
@@ -66,6 +66,7 @@ struct ThemeColors {
 };
 
 static ThemeColors g_theme;
+static bool g_dimTheme = false;
 
 static void applyTheme() {
     if (g_config.theme == 1) {
@@ -97,6 +98,24 @@ static void applyTheme() {
             true
         };
     }
+    if (g_dimTheme) {
+        // An intentionally faint monochrome palette, independent of the
+        // selected daytime theme. Keep the theme's command LED hue.
+        constexpr uint16_t text = 0x3186, faint = 0x18C3, selected = 0x4208;
+        g_theme.bg = g_theme.barBg = g_theme.rowBg = TFT_BLACK;
+        g_theme.numBg = g_theme.numBgEmpty = g_theme.cardBg = TFT_BLACK;
+        g_theme.rowSel = g_theme.numSelBg = 0x0841;
+        g_theme.rowText = g_theme.numText = g_theme.text = text;
+        g_theme.rowSelText = g_theme.numSelText = selected;
+        g_theme.barText = g_theme.dotOn = text;
+        g_theme.dotOff = g_theme.numTextEmpty = g_theme.dim = g_theme.off = faint;
+        g_theme.numberLine = g_theme.divider = g_theme.cardLine = 0x1082;
+        g_theme.accentLight = g_theme.accentSwitch = g_theme.accentClimate = text;
+        g_theme.accentScene = g_theme.accentMedia = g_theme.accentSensor = text;
+        g_theme.accentCover = g_theme.iconWell = g_theme.barTrack = faint;
+        g_theme.editBg = 0x1082;
+        g_theme.editText = selected;
+    }
 }
 
 static constexpr int SCR_W = 320;
@@ -116,7 +135,6 @@ static int g_focus = 0;
 static bool g_detail = false;
 static int g_detailGlobal = -1;
 static bool g_haStarted = false;
-static bool g_otaStarted = false;
 static bool g_linkBlinkOn = true;
 
 static bool g_haOnline = false;
@@ -314,7 +332,8 @@ static void sfxSelect() {
 }
 
 static uint32_t g_lastActivity = 0;
-static bool g_screenOff = false;
+static BacklightPhase g_backlightPhase = BacklightPhase::Normal;
+static int g_backlightOverride = -1;
 static int g_activePeriod = -1;
 static int g_appliedBrightness = -1;
 
@@ -396,9 +415,13 @@ static void applyBacklightPercent(int percent) {
     g_commandLedBrightness.store((uint8_t)pwm);
 }
 
+static void renderInitial();
+static void scheduleTick();
+
 static void noteActivity() {
     g_lastActivity = millis();
-    if (g_screenOff) g_screenOff = false;
+    g_backlightOverride = -1;
+    scheduleTick();
 }
 
 static bool inTimeRange(int now, int start, int end) {
@@ -407,47 +430,73 @@ static bool inTimeRange(int now, int start, int end) {
     return now >= start || now < end;
 }
 
+static void applyBacklightPlan(BacklightPlan plan) {
+    // Preserve the current palette while off; repaint it before lighting the
+    // screen on wake. Entering dim mode reduces the backlight before repaint.
+    bool dimTheme = plan.phase == BacklightPhase::Off ? g_dimTheme
+                                                     : plan.phase == BacklightPhase::Dim;
+    if (dimTheme != g_dimTheme) {
+        if (dimTheme) applyBacklightPercent(plan.brightness);
+        g_dimTheme = dimTheme;
+        applyTheme();
+        renderInitial();
+    }
+    g_backlightPhase = plan.phase;
+    applyBacklightPercent(plan.brightness);
+}
+
 static void scheduleTick() {
     struct tm timeinfo;
-    if (!getLocalTime(&timeinfo, 0) || timeinfo.tm_year < 120) {
-        g_screenOff = false;
-        applyBacklightPercent(g_config.brightness);
-        return;
+    bool clockReady = getLocalTime(&timeinfo, 0) && timeinfo.tm_year >= 120;
+    int period = -1;
+    if (clockReady) {
+        int now = timeinfo.tm_hour * 60 + timeinfo.tm_min;
+        bool isDay = inTimeRange(now, g_config.dayStart, g_config.dayEnd);
+        bool isNight = inTimeRange(now, g_config.nightStart, g_config.nightEnd);
+        period = isDay ? 0 : (isNight ? 1 : 0);
     }
-
-    int now = timeinfo.tm_hour * 60 + timeinfo.tm_min;
-    bool isDay = inTimeRange(now, g_config.dayStart, g_config.dayEnd);
-    bool isNight = inTimeRange(now, g_config.nightStart, g_config.nightEnd);
-    int period = isDay ? 0 : (isNight ? 1 : 0);
-
-    uint8_t brightness = (period == 0) ? g_config.dayBrightness
-                                       : g_config.nightBrightness;
-    uint16_t offSeconds = (period == 0) ? g_config.dayOffSeconds
-                                        : g_config.nightOffSeconds;
-
     if (period != g_activePeriod) {
         g_activePeriod = period;
-        g_screenOff = false;
         g_lastActivity = millis();
-        applyBacklightPercent(brightness);
-        return;
+        g_backlightOverride = -1;
     }
-
-    if (g_screenOff) return;
-
-    if (brightness == 0) {
-        applyBacklightPercent(0);
-        g_screenOff = true;
-        return;
+    bool night = period == 1;
+    uint8_t brightness = clockReady ? (night ? g_config.nightBrightness : g_config.dayBrightness)
+                                    : g_config.brightness;
+    uint8_t dimBrightness = night ? g_config.nightDimBrightness : g_config.dayDimBrightness;
+    BacklightPlan plan = {BacklightPhase::Normal, brightness};
+    if (clockReady) {
+        plan = planBacklight(millis() - g_lastActivity, brightness, dimBrightness,
+                             night ? g_config.nightDimSeconds : g_config.dayDimSeconds,
+                             night ? g_config.nightOffSeconds : g_config.dayOffSeconds);
     }
-
-    applyBacklightPercent(brightness);
-
-    if (offSeconds > 0 &&
-        millis() - g_lastActivity >= (uint32_t)offSeconds * 1000UL) {
-        applyBacklightPercent(0);
-        g_screenOff = true;
+    if (g_backlightOverride == (int)BacklightPhase::Dim) {
+        plan = {BacklightPhase::Dim, dimBrightness < brightness ? dimBrightness : brightness};
+    } else if (g_backlightOverride == (int)BacklightPhase::Off) {
+        plan = {BacklightPhase::Off, 0};
     }
+    applyBacklightPlan(plan);
+}
+
+bool setDisplayMode(const String& mode) {
+    if (mode == "wake") {
+        noteActivity();
+    } else if (mode == "dim" || mode == "off") {
+        scheduleTick();
+        g_backlightOverride = (int)(mode == "dim" ? BacklightPhase::Dim : BacklightPhase::Off);
+        scheduleTick();
+    } else {
+        return false;
+    }
+    return true;
+}
+
+String backlightStatus() {
+    const char* state = g_backlightPhase == BacklightPhase::Dim ? "dim"
+                         : (g_backlightPhase == BacklightPhase::Off ? "off" : "normal");
+    return "backlight=" + String(state) + " backlight_pwm=" + String(g_appliedBrightness) +
+           " dim_theme=" + String((int)g_dimTheme) +
+           " display_override=" + String(g_backlightOverride);
 }
 
 // ---------------------------------------------------------------------
@@ -1910,31 +1959,7 @@ void loop() {
         g_refreshIndex = -1;
         g_statusLinkDirty = true;
     }
-    if (wifiNow != WL_CONNECTED) g_otaStarted = false;
     g_prevWifiLink = wifiNow;
-
-    if (!g_otaStarted && wifiNow == WL_CONNECTED) {
-        ArduinoOTA.setHostname(g_config.hostname.c_str());
-        ArduinoOTA.setPassword(OTA_PASSWORD);
-        ArduinoOTA.onStart([]() { Serial.println("[ota] start"); });
-        ArduinoOTA.onEnd([]() { Serial.println("[ota] end"); });
-        ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-            static int lastPct = -1;
-            int pct = total ? (progress * 100 / total) : 0;
-            if (pct / 10 != lastPct) {
-                lastPct = pct / 10;
-                Serial.printf("[ota] %d%%\n", pct);
-            }
-        });
-        ArduinoOTA.onError([](ota_error_t error) {
-            Serial.printf("[ota] error %u\n", (unsigned)error);
-        });
-        ArduinoOTA.begin();
-        g_otaStarted = true;
-        Serial.printf("[ota] ready http://%s/ password=haremote\n",
-                      WiFi.localIP().toString().c_str());
-    }
-    if (g_otaStarted) ArduinoOTA.handle();
 
     if (!g_haStarted && wifiNow == WL_CONNECTED && haConfigured()) {
         haBegin();

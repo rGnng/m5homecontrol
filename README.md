@@ -150,13 +150,20 @@ so actual dock charging detection requires a hardware status connection.
 
 Configured in the web page under **Display**.
 
-- `day`: 07:00-21:00, brightness 5%, screen off disabled by default
-- `night`: 21:00-07:00, brightness 5%, screen off disabled by default
-- Each period has an idle/wake brightness and a screen-off timeout in seconds
-- `0` seconds means the screen never turns off
-- Any button or serial key wakes the screen and resets the timer
-- When a timeout is configured, the screen turns off that many seconds after
-  the last input
+- `day`: 07:00-21:00, brightness 5%, automatic dim/off disabled by default
+- `night`: 21:00-07:00, brightness 5%; after 10 minutes idle, dim at 1% for
+  2 more minutes, then turn off (12 minutes total)
+- Each period has normal/dim brightness, an idle-to-dim timeout, and a
+  dim-to-off timeout. The web form uses seconds: night defaults are 600 and 120
+- Dim mode uses a black background, faint grey text, and subdued selection,
+  numbers, status icons, and editing colors regardless of the chosen normal theme
+- `0` disables a timeout. If dimming is disabled, the off timeout starts at last input
+- Any button or serial key restores the normal theme/brightness and resets idle time
+- Web **Wake**, **Dim**, and **Off** buttons preview the live display using saved
+  brightness settings without saving. Any input or the next schedule period clears
+  the preview. Wake returns to the normal view
+- Older custom nonzero off timeouts keep their direct-to-off behavior; an old
+  disabled night timeout adopts the new 10-minute/2-minute defaults
 
 The fallback brightness is used until network time is available.
 
@@ -193,17 +200,18 @@ Fields:
 
 - Theme: `Flipper` (default) or `Classic`
 - Fallback brightness, 1-100%, default 30%
-- Day/night brightness and screen-off timeouts
+- Day/night normal/dim brightness, dim/off timeouts, and live Wake/Dim/Off previews
 - Dynamic page blocks: title + eight slots
 - Each slot: entity ID and display name
 - Climate slots only: optional AUX entity/name and allowed MODE values (COOL/HEAT/DRY/FAN/AUTO)
-- Hostname used for `http://<hostname>.local/` and OTA
+- Hostname used for `http://<hostname>.local/`, including web firmware updates
 - Wi-Fi SSID and password
 - Home Assistant base URL
 - Long-lived access token
 
 The page is plain: square inputs and buttons, no rounded corners. Empty slots
 and empty pages are kept as configured.
+After saving, the page waits for the device to restart and reloads automatically.
 
 ## Serial configuration
 
@@ -293,22 +301,27 @@ The full screen is painted once at boot.
 
 ## Build and flash
 
+### Default flashing credentials
+
+| Flash method | Username | Password |
+| --- | --- | --- |
+| Web OTA (`/update`) | `admin` | `haremote` |
+| USB | Not required | Not required |
+
+The web credentials are `FIRMWARE_UPDATE_USER` and `FIRMWARE_UPDATE_PASSWORD`
+in [include/app_config.h](include/app_config.h).
+
+### Build and upload
+
 ```sh
 pio run
 pio run -t upload --upload-port /dev/cu.usbserial-5A6C0461241
 pio device monitor -p /dev/cu.usbserial-5A6C0461241 -b 115200
 ```
 
-After the first USB flash, updates can be pushed over Wi-Fi:
-
-```sh
-pio run -e m5stack-core-ota -t upload
-```
-
-The OTA environment targets `10.0.0.217` and uses the OTA password
-`haremote`; update `upload_port` in `platformio.ini` if the device IP changes.
-The configured hostname (`ha-remote` by default) is advertised over mDNS and
-used as the OTA hostname.
+After the first USB flash, update over Wi-Fi through the web firmware page.
+The configured hostname (`ha-remote` by default) is advertised over mDNS for
+access at `http://<hostname>.local/`.
 
 ### HTTP firmware updates
 
@@ -316,7 +329,7 @@ Open **Update firmware** on the configuration page, or go directly to
 `http://<device-ip>/update`. Through the existing tunnel, use
 `http://127.0.0.1:10090/update`.
 
-- Username: `admin`; password: `haremote` (the ArduinoOTA password)
+- Username: `admin`; password: `haremote`
 - Select `.pio/build/m5stack-core/firmware.bin`, then **Upload and restart**
 - Progress and upload errors appear on the page; only a successful update restarts
 - Existing configuration is kept
@@ -331,8 +344,7 @@ curl --fail-with-body --user admin:haremote \
   "http://127.0.0.1:10090/update?size=$(wc -c < "$firmware" | tr -d ' ')"
 ```
 
-The first installation of firmware with this feature still requires USB or
-ArduinoOTA; older firmware does not have the `/update` endpoint.
+Use USB for the first installation if the device has no `/update` endpoint.
 
 ## Files
 
@@ -343,11 +355,12 @@ src/app_config.cpp    NVS, network, web server, serial console
 src/ha_client.cpp     REST + WebSocket client
 src/power_status.cpp  shared power sampling, PMIC recovery, battery handoff
 include/app_config.h
+include/backlight_schedule.h
 include/ha_client.h
 include/power_status.h
 ```
 
-Power logic host checks (no device required):
+Power and backlight host checks (no device required):
 
 ```sh
 g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
@@ -356,4 +369,7 @@ g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
 g++ -std=c++17 -Wall -Wextra -Werror -Itools/test_support -Iinclude \
   src/power_status.cpp tools/test_power_recovery.cpp -o /tmp/m5-power-recovery-test
 /tmp/m5-power-recovery-test
+g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
+  tools/test_backlight_schedule.cpp -o /tmp/m5-backlight-test
+/tmp/m5-backlight-test
 ```

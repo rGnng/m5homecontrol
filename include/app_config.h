@@ -2,7 +2,8 @@
 
 #include <Arduino.h>
 
-static constexpr const char* OTA_PASSWORD = "haremote";
+static constexpr const char* FIRMWARE_UPDATE_USER = "admin";
+static constexpr const char* FIRMWARE_UPDATE_PASSWORD = "haremote";
 
 static constexpr int GRID_SLOTS = 8;
 static constexpr int MAX_PAGES = 12;
@@ -34,12 +35,16 @@ struct AppConfig {
     uint16_t dayStart = 7 * 60;
     uint16_t dayEnd = 21 * 60;
     uint8_t dayBrightness = 5;
+    uint8_t dayDimBrightness = 1;
+    uint16_t dayDimSeconds = 0;
     uint16_t dayOffSeconds = 0;
 
     uint16_t nightStart = 21 * 60;
     uint16_t nightEnd = 7 * 60;
     uint8_t nightBrightness = 5;
-    uint16_t nightOffSeconds = 0;
+    uint8_t nightDimBrightness = 1;
+    uint16_t nightDimSeconds = 600;
+    uint16_t nightOffSeconds = 120;
 };
 
 extern AppConfig g_config;
@@ -55,5 +60,7 @@ bool configModeActive();
 String networkIp();
 String commandLedsStatus();
 String menuStatus();
+String backlightStatus();
+bool setDisplayMode(const String& mode);
 
 void appConfigHandleCommand(const String& line);

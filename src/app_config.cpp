@@ -113,12 +113,20 @@ void configLoad() {
     g_config.dayStart = constrain(p.getInt("ds", 7 * 60), 0, 1439);
     g_config.dayEnd = constrain(p.getInt("de", 21 * 60), 0, 1439);
     g_config.dayBrightness = constrain(p.getInt("db", 5), 0, 100);
+    g_config.dayDimBrightness = constrain(p.getInt("ddb", 1), 1, 100);
+    g_config.dayDimSeconds = constrain(p.getInt("dd", 0), 0, 3600);
     g_config.dayOffSeconds = constrain(p.getInt("do", 0), 0, 3600);
 
     g_config.nightStart = constrain(p.getInt("ns", 21 * 60), 0, 1439);
     g_config.nightEnd = constrain(p.getInt("ne", 7 * 60), 0, 1439);
     g_config.nightBrightness = constrain(p.getInt("nb", 5), 0, 100);
-    g_config.nightOffSeconds = constrain(p.getInt("no", 0), 0, 3600);
+    g_config.nightDimBrightness = constrain(p.getInt("ndb", 1), 1, 100);
+    // Migrate the old single off timer. Preserve a custom nonzero timeout;
+    // an old disabled timer adopts the new 10 min dim + 2 min off defaults.
+    bool hasDimSchedule = p.isKey("nd");
+    int legacyOff = constrain(p.getInt("no", 0), 0, 3600);
+    g_config.nightDimSeconds = constrain(p.getInt("nd", legacyOff ? 0 : 600), 0, 3600);
+    g_config.nightOffSeconds = hasDimSchedule ? legacyOff : (legacyOff ? legacyOff : 120);
     p.end();
     normalizeAuxEntities();
 }
@@ -177,10 +185,14 @@ bool configSave() {
     putIntKey("ds", g_config.dayStart);
     putIntKey("de", g_config.dayEnd);
     putIntKey("db", g_config.dayBrightness);
+    putIntKey("ddb", g_config.dayDimBrightness);
+    putIntKey("dd", g_config.dayDimSeconds);
     putIntKey("do", g_config.dayOffSeconds);
     putIntKey("ns", g_config.nightStart);
     putIntKey("ne", g_config.nightEnd);
     putIntKey("nb", g_config.nightBrightness);
+    putIntKey("ndb", g_config.nightDimBrightness);
+    putIntKey("nd", g_config.nightDimSeconds);
     putIntKey("no", g_config.nightOffSeconds);
     p.end();
     return ok;
@@ -258,6 +270,7 @@ static String htmlHeader(const String& title) {
     h += "th{text-align:left;font-size:12px;color:#888;font-weight:600;padding:4px 0}";
     h += ".modesrow td{padding:0 0 10px}.modelabel{font-size:12px;color:#888;margin-right:8px}";
     h += ".auxfields{display:grid;grid-template-columns:1fr 1fr;gap:8px}";
+    h += ".schedule-scroll{overflow-x:auto}.schedule-scroll table{min-width:560px}";
     h += "label.inline{display:inline-flex;align-items:center;gap:4px;margin:0 10px 0 0;font-size:12px;color:#aaa}";
     h += "label.inline input{width:auto;margin:0}";
     h += ".pagehead{font-weight:600;margin:18px 0 6px;color:#fff}";
@@ -373,25 +386,39 @@ static void handleRoot() {
     page += "<label>Fallback brightness (%)</label><input name=\"bright\" type=\"number\" min=\"1\" max=\"100\" value=\"" +
             String(g_config.brightness) + "\">";
     page += "<div class=\"pagehead\">Backlight Schedule</div>";
-    page += "<table><tbody>";
-    page += "<tr><th></th><th>Start</th><th>End</th><th>Brightness %</th><th>Off after (s)</th></tr>";
-    page += "<tr><td>day</td>";
-    page += "<td><input name=\"dstart\" type=\"time\" value=\"" + formatTime(g_config.dayStart) + "\"></td>";
-    page += "<td><input name=\"dend\" type=\"time\" value=\"" + formatTime(g_config.dayEnd) + "\"></td>";
-    page += "<td><input name=\"dbright\" type=\"number\" min=\"0\" max=\"100\" value=\"" +
-            String(g_config.dayBrightness) + "\"></td>";
-    page += "<td><input name=\"doff\" type=\"number\" min=\"0\" max=\"3600\" value=\"" +
-            String(g_config.dayOffSeconds) + "\"></td></tr>";
-    page += "<tr><td>night</td>";
-    page += "<td><input name=\"nstart\" type=\"time\" value=\"" + formatTime(g_config.nightStart) + "\"></td>";
-    page += "<td><input name=\"nend\" type=\"time\" value=\"" + formatTime(g_config.nightEnd) + "\"></td>";
-    page += "<td><input name=\"nbright\" type=\"number\" min=\"0\" max=\"100\" value=\"" +
-            String(g_config.nightBrightness) + "\"></td>";
-    page += "<td><input name=\"noff\" type=\"number\" min=\"0\" max=\"3600\" value=\"" +
-            String(g_config.nightOffSeconds) + "\"></td></tr>";
-    page += "</tbody></table>";
-    page += "<p>Brightness is the idle/wake brightness. Any input wakes the screen; "
-            "it turns off again after the screen-off timeout. 0 means never.</p>";
+    page += "<div class=\"schedule-scroll\"><table><tbody>";
+    page += "<tr><th></th><th>Start</th><th>End</th><th>Brightness %</th>"
+            "<th>Dim %</th><th>Dim after (s)</th><th>Off after dim (s)</th></tr>";
+    auto scheduleRow = [&](const char* label, const char* prefix, uint16_t start, uint16_t end,
+                           uint8_t brightness, uint8_t dimBrightness, uint16_t dim, uint16_t off) {
+        page += "<tr><td>" + String(label) + "</td>";
+        page += "<td><input name=\"" + String(prefix) + "start\" type=\"time\" value=\"" + formatTime(start) + "\"></td>";
+        page += "<td><input name=\"" + String(prefix) + "end\" type=\"time\" value=\"" + formatTime(end) + "\"></td>";
+        auto number = [&](const char* suffix, unsigned value, unsigned min, unsigned max) {
+            page += "<td><input name=\"" + String(prefix) + suffix + "\" type=\"number\" min=\"" +
+                    String(min) + "\" max=\"" + String(max) + "\" value=\"" + String(value) + "\"></td>";
+        };
+        number("bright", brightness, 0, 100);
+        number("dimbright", dimBrightness, 1, 100);
+        number("dim", dim, 0, 3600);
+        number("off", off, 0, 3600);
+        page += "</tr>";
+    };
+    scheduleRow("day", "d", g_config.dayStart, g_config.dayEnd, g_config.dayBrightness,
+                g_config.dayDimBrightness, g_config.dayDimSeconds, g_config.dayOffSeconds);
+    scheduleRow("night", "n", g_config.nightStart, g_config.nightEnd, g_config.nightBrightness,
+                g_config.nightDimBrightness, g_config.nightDimSeconds, g_config.nightOffSeconds);
+    page += "</tbody></table></div>";
+    page += "<p>After the dim timeout, use a black background with faint text at Dim brightness. "
+            "The off timeout starts when dimming begins. With dim disabled (0), it starts from the last input. "
+            "0 disables each timeout. Any input wakes the screen. "
+            "Night defaults: dim after 10 minutes, then off 2 minutes later.</p>";
+    page += "<div class=\"pagehead\">Preview display</div>";
+    page += "<div class=\"actions\"><button type=\"button\" onclick=\"previewDisplay('wake')\">Wake</button>"
+            "<button type=\"button\" onclick=\"previewDisplay('dim')\">Dim</button>"
+            "<button type=\"button\" onclick=\"previewDisplay('off')\">Off</button></div>";
+    page += "<p id=\"display-status\" role=\"status\">Preview uses the saved brightness settings. "
+            "Any device input or Wake restores the normal view.</p>";
     page += "</fieldset>";
 
     page += "</div>";
@@ -598,6 +625,36 @@ async function refreshPower() {
     status.textContent = 'Could not read battery status. Check the connection and retry.';
   }
 }
+async function previewDisplay(mode) {
+  const status = document.getElementById('display-status');
+  try {
+    const response = await fetch('/display', {
+      method: 'POST', body: new URLSearchParams({mode})
+    });
+    if (!response.ok) throw new Error('Display control failed');
+    status.textContent = mode === 'wake' ? 'Display awake.' :
+      (mode === 'dim' ? 'Dim preview active.' : 'Display off. Use Wake to turn it on.');
+  } catch (error) {
+    status.textContent = 'Could not reach the display. Try again.';
+  }
+}
+async function reconnectAfterSave() {
+  // Give the save handler time to finish its response and restart the device.
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  for (let attempt = 0; attempt < 60; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2000);
+    try {
+      const response = await fetch('/diag', {cache: 'no-store', signal: controller.signal});
+      if (response.ok) {
+        window.location.reload();
+        return;
+      }
+    } catch (error) {} finally { clearTimeout(timer); }
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  throw new Error('Settings saved, but reconnecting timed out. You can retry or reload the page.');
+}
 function closeConnection() {
   document.getElementById('connection-modal').classList.remove('open');
 }
@@ -614,6 +671,7 @@ document.querySelector('form[action="/save"]').addEventListener('submit', functi
   const buttons = form.querySelectorAll('button[type="submit"]');
   buttons.forEach(function(button) { button.disabled = true; });
   status.textContent = 'Saving...';
+  let saved = false;
   const payload = new URLSearchParams(new FormData(form));
   payload.set('ajax', '1');
   fetch('/save', {
@@ -622,9 +680,11 @@ document.querySelector('form[action="/save"]').addEventListener('submit', functi
   }).then(async function(response) {
     const text = await response.text();
     if (!response.ok) throw new Error(text || 'Save failed');
+    saved = true;
     status.textContent = 'Saved. Rebooting...';
+    await reconnectAfterSave();
   }).catch(function(error) {
-    status.textContent = 'Save failed: ' + error.message;
+    status.textContent = saved ? error.message : 'Save failed: ' + error.message;
     buttons.forEach(function(button) { button.disabled = false; });
   });
 });
@@ -690,11 +750,15 @@ static void handleSave() {
     g_config.dayStart = parseTime(server.arg("dstart"), g_config.dayStart);
     g_config.dayEnd = parseTime(server.arg("dend"), g_config.dayEnd);
     g_config.dayBrightness = constrain(server.arg("dbright").toInt(), 0, 100);
+    if (server.hasArg("ddimbright")) g_config.dayDimBrightness = constrain(server.arg("ddimbright").toInt(), 1, 100);
+    if (server.hasArg("ddim")) g_config.dayDimSeconds = constrain(server.arg("ddim").toInt(), 0, 3600);
     g_config.dayOffSeconds = constrain(server.arg("doff").toInt(), 0, 3600);
 
     g_config.nightStart = parseTime(server.arg("nstart"), g_config.nightStart);
     g_config.nightEnd = parseTime(server.arg("nend"), g_config.nightEnd);
     g_config.nightBrightness = constrain(server.arg("nbright").toInt(), 0, 100);
+    if (server.hasArg("ndimbright")) g_config.nightDimBrightness = constrain(server.arg("ndimbright").toInt(), 1, 100);
+    if (server.hasArg("ndim")) g_config.nightDimSeconds = constrain(server.arg("ndim").toInt(), 0, 3600);
     g_config.nightOffSeconds = constrain(server.arg("noff").toInt(), 0, 3600);
 
     int pages = server.arg("pagecount").toInt();
@@ -773,8 +837,7 @@ static void handleSave() {
     ESP.restart();
 }
 
-// Only this upload may abort or finish the shared Update object. ArduinoOTA
-// also uses it, so reject a concurrent update without disturbing its owner.
+// Only the owning HTTP upload may abort or finish the shared Update object.
 struct WebFirmwareUpload {
     bool ownsUpdate = false;
     bool fileEnded = false;
@@ -783,7 +846,7 @@ struct WebFirmwareUpload {
 static WebFirmwareUpload g_firmwareUpload;
 
 static bool firmwareAuthenticated() {
-    return server.authenticate("admin", OTA_PASSWORD);
+    return server.authenticate(FIRMWARE_UPDATE_USER, FIRMWARE_UPDATE_PASSWORD);
 }
 
 static void handleFirmwarePage() {
@@ -924,12 +987,21 @@ static void startWebServer() {
             server.sendHeader("Cache-Control", "no-store");
             server.send(200, "text/plain", powerSummary());
         });
+        server.on("/display", HTTP_POST, []() {
+            if (!setDisplayMode(server.arg("mode"))) {
+                server.send(400, "text/plain", "Unknown display mode");
+                return;
+            }
+            server.sendHeader("Cache-Control", "no-store");
+            server.send(200, "text/plain", "OK");
+        });
         server.on("/update", HTTP_GET, handleFirmwarePage);
         server.on("/update", HTTP_POST, handleFirmwareComplete, handleFirmwareUpload);
         server.on("/diag", HTTP_GET, []() {
             PowerStatus power = readPowerStatus();
             String text = "board=" + String((int)M5.getBoard());
             text += " " + menuStatus();
+            text += " " + backlightStatus();
             text += " " + commandLedsStatus();
             text += " charging=" + String(chargeStateName(power.charging));
             text += " core_charging=" + String(chargeStateName(power.coreCharging));
@@ -1061,14 +1133,16 @@ static void printConfig() {
                                                        g_config.haToken.substring(g_config.haToken.length() - 4)).c_str()
                                                     : "********"));
     Serial.printf("[cfg] fallback brightness=%u%%\n", g_config.brightness);
-    Serial.printf("[cfg] day %s-%s bright=%u%% off=%us\n",
+    Serial.printf("[cfg] day %s-%s bright=%u%% dim=%u%% after=%us off=%us later\n",
                   formatTime(g_config.dayStart).c_str(),
                   formatTime(g_config.dayEnd).c_str(),
-                  g_config.dayBrightness, g_config.dayOffSeconds);
-    Serial.printf("[cfg] night %s-%s bright=%u%% off=%us\n",
+                  g_config.dayBrightness, g_config.dayDimBrightness,
+                  g_config.dayDimSeconds, g_config.dayOffSeconds);
+    Serial.printf("[cfg] night %s-%s bright=%u%% dim=%u%% after=%us off=%us later\n",
                   formatTime(g_config.nightStart).c_str(),
                   formatTime(g_config.nightEnd).c_str(),
-                  g_config.nightBrightness, g_config.nightOffSeconds);
+                  g_config.nightBrightness, g_config.nightDimBrightness,
+                  g_config.nightDimSeconds, g_config.nightOffSeconds);
     Serial.printf("[cfg] pages=%u\n", g_config.pageCount);
     for (int p = 0; p < g_config.pageCount; p++) {
         Serial.printf("[cfg] page %d title=%s\n", p + 1,
