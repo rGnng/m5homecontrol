@@ -202,6 +202,8 @@ static char keypadPoll() {
 // ---------------------------------------------------------------------
 static constexpr int SIDE_LED_COUNT = 10;
 static bool g_sideLedsReady = false;
+static bool g_sideLedInitOk = false;
+static int g_sideLedPin = -1;
 static bool g_sideLedTimer = false;
 static uint32_t g_sideLedOffAt = 0;
 static uint32_t g_lastDockPoll = 0;
@@ -211,23 +213,41 @@ static void sideLedsInit() {
     auto board = M5.getBoard();
     if (board != m5::board_t::board_M5Stack &&
         board != m5::board_t::board_M5StackCore2) {
+        Serial.printf("[led] unsupported board %d\n", (int)board);
         return;
     }
 
     auto* strip = static_cast<m5::LED_Strip_Class*>(M5.Led.getLedInstancePtr());
-    if (!strip) return;
+    if (!strip) {
+        Serial.println("[led] no LED instance");
+        return;
+    }
 
     auto cfg = strip->getConfig();
     cfg.led_count = SIDE_LED_COUNT;
+    cfg.color_order = m5::LED_Strip_Class::config_t::color_order_grb;
     strip->setConfig(cfg);
 
-    M5.Led.setBrightness(64);
-    M5.Led.setAllColor(0, 0, 0);
-    M5.Led.display();
-    g_sideLedsReady = true;
+    g_sideLedPin = (int)M5.getPin(m5::pin_name_t::rgb_led);
+    g_sideLedInitOk = M5.Led.begin();
+    g_sideLedsReady = g_sideLedInitOk;
 
-    Serial.printf("[led] side LEDs=%u pin=%d\n", (unsigned)M5.Led.getCount(),
-                  (int)M5.getPin(m5::pin_name_t::rgb_led));
+    if (g_sideLedInitOk) {
+        M5.Led.setBrightness(96);
+        M5.Led.setAllColor(0, 0, 0);
+        M5.Led.display();
+    }
+
+    Serial.printf("[led] count=%u pin=%d init=%d\n",
+                  (unsigned)M5.Led.getCount(), g_sideLedPin, (int)g_sideLedInitOk);
+}
+
+String sideLedsStatus() {
+    String text = "ready=" + String((int)g_sideLedsReady);
+    text += " init=" + String((int)g_sideLedInitOk);
+    text += " pin=" + String(g_sideLedPin);
+    text += " count=" + String((unsigned)M5.Led.getCount());
+    return text;
 }
 
 static bool dockPowerPresent() {
@@ -263,6 +283,7 @@ static void sideLedsShowBattery() {
         r = 255; g = 0; b = 0;
     }
 
+    M5.Led.setBrightness(96);
     M5.Led.setAllColor(0, 0, 0);
 
     if (count < 4) {
@@ -288,6 +309,16 @@ static void sideLedsShowBattery() {
 
 void sideLedsPreview() {
     sideLedsShowBattery();
+    g_sideLedTimer = true;
+    g_sideLedOffAt = millis() + 2000;
+}
+
+void sideLedsTest() {
+    if (!g_sideLedsReady) return;
+
+    M5.Led.setBrightness(255);
+    M5.Led.setAllColor(255, 255, 255);
+    M5.Led.display();
     g_sideLedTimer = true;
     g_sideLedOffAt = millis() + 2000;
 }
