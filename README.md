@@ -5,6 +5,7 @@ A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 - M5Code-style menu: eight rows per page
 - Two themes: `Flipper` (default) and `Classic`
 - Bitmap font for menu rows, states, and detail values
+- Original Adafruit GFX classic 5x7 English font (M5GFX Font0), displayed at 2x
 - Numbered index column, entity name, live state on the right
 - Dynamic number of pages, eight entities per page
 - Configurable page titles, default `PAGE1`, `PAGE2`, ...
@@ -37,6 +38,7 @@ A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 - Menu starts at y = 24
 - Row height = 27 px, eight rows per page
 - Left index column: 24 px
+- Menu text starts 6 px below the row top
 - Flipper theme: orange rows, dark index text; the selected row and index cell
   use a medium brown background with cream text
 - Classic theme: dark blue selected row with green text
@@ -46,7 +48,9 @@ A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 - Custom display name overrides the Home Assistant friendly name; empty uses the
   HA friendly name
 - Climate entities show the actual HA mode: `HEAT`, `COOL`, `AUTO`, `DRY`,
-  `FAN`, `OFF`, plus the current temperature when available
+  `FAN`, `OFF`, plus the target temperature. If no target is available, the menu
+  falls back to the measured temperature; AC detail's CURRENT row shows the
+  measured room temperature
 
 ## Status bar
 
@@ -153,8 +157,12 @@ so actual dock charging detection requires a hardware status connection.
 
 ## Backlight schedule
 
-Configured in the web page under **Display**. Times use UTC+8 (`CST-8`),
-synchronized over NTP after Wi-Fi connects.
+Configured in the web page under **Display**. Schedule times use Home Assistant's
+configured timezone. A watched HA `now()` template supplies UTC time, the current
+UTC offset, and the timezone name over the authenticated WebSocket connection.
+Updates arrive on connection and at each minute boundary, so HA handles daylight
+saving and timezone changes. No fixed UTC+8 timezone or public NTP server is used.
+The web Display section shows HA local time and timezone when the page is loaded.
 
 - `day`: 07:00-21:00, brightness 5%, automatic dim/off disabled by default
 - `night`: 21:00-07:00, brightness 5%; after 10 minutes idle, dim at 1% for
@@ -177,8 +185,12 @@ synchronized over NTP after Wi-Fi connects.
 - Older custom nonzero off timeouts keep their direct-to-off behavior; an old
   disabled night timeout adopts the new 10-minute/2-minute defaults
 
-The fallback brightness is used until network time is available.
-Once dim/off, loss or recovery of network time does not brighten the display.
+The fallback brightness is used until the first valid HA clock sample arrives.
+Between updates, a 64-bit monotonic clock keeps time advancing. If HA disconnects,
+the last known offset is retained until a fresh sample arrives after reconnect;
+DST/timezone changes while offline cannot be learned until then. Missing or
+invalid clock updates are retried without changing the last good clock.
+Once dim/off, clock synchronization cannot brighten the display.
 
 ## Sound
 
@@ -245,6 +257,9 @@ Backlight diagnostics include `backlight=normal|dim|off`, `backlight_pwm` (0–2
 `dim_theme` (0/1), and `display_override` (-1 for automatic, 1 for Dim preview,
 2 for Off preview). **Wake** and physical input clear the override. Automatic
 updates may dim or turn off the screen, but cannot wake or brighten it.
+Clock diagnostics include `time_source=ha|unavailable`, `ha_timezone`,
+`utc_offset` (seconds east of UTC), `local_time`, and `ha_clock_age` (seconds
+since the last valid sample). Reading diagnostics does not count as activity.
 
 ## Serial configuration
 
@@ -278,7 +293,30 @@ updates may dim or turn off the screen, but cannot wake or brighten it.
 | FACES keypad r1c2 (M) / r1c3 (%) | previous / next page (wraps at either end; main menu only) |
 | FACES keypad 0 | back / cancel temperature edit |
 | FACES keypad r5c4 (=), short or long press | open AC detail if available; otherwise toggle/run the focused entity; activate or confirm within AC detail |
+| FACES keypad r3c4 (+) / r4c4 (-) | increase / decrease the selected adjustable value |
 | Select an AC item | cycle OFF and its allowed, HA-supported modes |
+
+Number positions are remapped on the physical keypad:
+
+```text
+       c1   c2   c3   c4
+r2      1    2    3
+r3      4    5    6    +
+r4      7    8    9    -
+```
+
+Other keypad positions keep their existing behavior. There are eight menu slots,
+so 9 has no assigned slot. Serial digits retain their normal numeric meanings.
+
+In the main menu, `+`/`-` adjusts AC target temperature by HA's reported
+`target_temp_step`, clamped to `min_temp`/`max_temp`, or light brightness by 10
+percentage points, clamped to 0-100%. At 0%, the light turns off. On/off-only
+lights, unavailable entities, sensors, and other non-adjustable items do nothing.
+The target/value updates after a successful HA command; no command is sent when
+already at the requested limit. Adjusting AC temperature does not optimistically
+change its power state.
+The AC menu shows the target setpoint, so successful `+`/`-` changes are visible
+immediately even while the measured room temperature remains steady.
 
 Only AC items have a detail panel. Sensors remain read-only in the main menu.
 These actions apply when the display is normal or dim. When it is off, the
@@ -302,6 +340,10 @@ Long press B on a `climate.*` row opens a detail menu with eight numbered rows:
 
 - MODE cycles OFF plus the allowed, HA-supported modes configured in the web UI
 - TEMP enters edit mode: A/C change by `target_temp_step`, B confirms; long B discards the edit and returns to the menu
+- With TEMP highlighted, `+`/`-` adjusts it immediately; during an explicit edit,
+  `+`/`-` changes the draft and B/r5c4 still confirms it
+- With a dimmable light AUX highlighted, `+`/`-` adjusts its brightness; the AUX
+  value shows its percentage. Other AC detail rows ignore these keys
 - FAN and SWING cycle the HA `fan_modes` / `swing_modes`
 - ACTION and CURRENT are read-only
 - Only climate items can have an AUX entity; switches/lights toggle, scenes run, sensors are read-only
@@ -323,6 +365,7 @@ Value refreshes in the menu and AC panel redraw only changed text bounds;
 unchanged values are skipped. Shorter values clear their previous width so no
 old characters remain. Labels redraw only when their text, color, or truncation
 changes. Selection, edit highlighting, and page changes redraw the affected rows.
+Full-screen and panel-transition clears use black before painting the theme.
 The full screen redraws at boot and when entering/leaving the dim palette.
 Ordinary value refreshes do not clear the entire row or screen.
 
@@ -393,11 +436,14 @@ src/ha_client.cpp     REST + WebSocket client
 src/power_status.cpp  shared power sampling, PMIC recovery, battery handoff
 include/app_config.h
 include/backlight_schedule.h
+include/keypad_controls.h  physical keypad remap
 include/ha_client.h
+include/ha_clock.h    HA clock and local-time conversion
 include/power_status.h
 ```
 
-Power and backlight host checks (no device required):
+Host checks (no device required; control/WebSocket checks use the ArduinoJson
+dependency installed by PlatformIO):
 
 ```sh
 g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
@@ -409,4 +455,9 @@ g++ -std=c++17 -Wall -Wextra -Werror -Itools/test_support -Iinclude \
 g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
   tools/test_backlight_schedule.cpp -o /tmp/m5-backlight-test
 /tmp/m5-backlight-test
+python3 tools/test_controls.py
+g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
+  tools/test_ha_clock.cpp -o /tmp/m5-ha-clock-test
+/tmp/m5-ha-clock-test
+python3 tools/test_ha_clock_ws.py
 ```

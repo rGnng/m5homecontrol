@@ -413,6 +413,8 @@ static void handleRoot() {
             "The off timeout starts when dimming begins. With dim disabled (0), it starts from the last input. "
             "0 disables each timeout. Any input wakes the screen. "
             "Night defaults: dim after 10 minutes, then off 2 minutes later.</p>";
+    page += "<p>Schedule time comes from Home Assistant. Local time: " +
+            htmlEscape(haLocalTimeText()) + "; time zone: " + htmlEscape(haTimeZone()) + ".</p>";
     page += "<div class=\"pagehead\">Preview display</div>";
     page += "<div class=\"actions\"><button type=\"button\" onclick=\"previewDisplay('wake')\">Wake</button>"
             "<button type=\"button\" onclick=\"previewDisplay('dim')\">Dim</button>"
@@ -1002,6 +1004,7 @@ static void startWebServer() {
             String text = "board=" + String((int)M5.getBoard());
             text += " " + menuStatus();
             text += " " + backlightStatus();
+            text += " " + haClockStatus();
             text += " " + commandLedsStatus();
             text += " charging=" + String(chargeStateName(power.charging));
             text += " core_charging=" + String(chargeStateName(power.coreCharging));
@@ -1088,12 +1091,6 @@ void networkLoop() {
             if (!g_mdnsStarted && MDNS.begin(g_config.hostname.c_str())) {
                 MDNS.addService("http", "tcp", 80);
                 g_mdnsStarted = true;
-            }
-            static bool timeConfigured = false;
-            if (!timeConfigured) {
-                configTzTime("CST-8", "ntp.aliyun.com", "pool.ntp.org",
-                             "time.nist.gov");
-                timeConfigured = true;
             }
             startWebServer();
         }

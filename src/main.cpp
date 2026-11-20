@@ -19,6 +19,7 @@
 #include "power_status.h"
 #include "side_led_bus.h"
 #include "ha_client.h"
+#include "keypad_controls.h"
 #include "sfx_data.h"
 
 // ---------------------------------------------------------------------
@@ -124,6 +125,7 @@ static constexpr int SB_H  = 24;
 
 static constexpr int MENU_Y = 24;
 static constexpr int MENU_ROW_H = 27;
+static constexpr int MENU_TEXT_Y = 6;
 
 // ---------------------------------------------------------------------
 //  State
@@ -210,10 +212,7 @@ static char keypadPoll() {
     uint8_t raw = keypadReadByte();
     if (raw == 0 || raw == 0xFF) return 0;
 
-    char c = 0;
-    if (raw >= '0' && raw <= '9') c = (char)raw;
-    else if (raw == 'A' || raw == '\b' || raw == 'M' || raw == '%' || raw == '=') c = (char)raw;
-    else if (raw == 0x0D) c = '\r';
+    char c = remapKeypadKey(raw);
     if (c == 0) return 0;
 
     if (c == g_lastKey && now - g_lastKeyTime < 120) return 0;
@@ -448,7 +447,7 @@ static void applyBacklightPlan(BacklightPlan plan) {
 
 static void scheduleTick(bool explicitInput) {
     struct tm timeinfo;
-    bool clockReady = getLocalTime(&timeinfo, 0) && timeinfo.tm_year >= 120;
+    bool clockReady = haGetLocalTime(timeinfo);
     int period = -1;
     if (clockReady) {
         int now = timeinfo.tm_hour * 60 + timeinfo.tm_min;
@@ -636,8 +635,10 @@ static String entityStateText(const EntityState& e) {
             String s = upperText(e.state);
             if (s == "HEAT_COOL") s = "HEAT/COOL";
             else if (s == "FAN_ONLY") s = "FAN";
-            float t = validTemp(e.current) ? e.current
-                                          : (validTemp(e.target) ? e.target : NAN);
+            // The menu adjusts the setpoint with +/-; display that same value.
+            // The measured room temperature remains in AC detail's CURRENT row.
+            float t = validTemp(e.target) ? e.target
+                                         : (validTemp(e.current) ? e.current : NAN);
             if (validTemp(t)) s += " " + tempText(t);
             return s;
         }
@@ -824,7 +825,7 @@ static void paintListRow(LovyanGFX& g, int slot, const RowPaint& row,
             g.drawFastVLine(24, y, MENU_ROW_H, g_theme.numberLine);
         }
         char number[2] = { char('1' + slot), 0 };
-        txt(g, number, 6, y + 5, row.numberColor, 2);
+        txt(g, number, 6, y + MENU_TEXT_Y, row.numberColor, 2);
         if (slot < GRID_SLOTS - 1) drawThemeDivider(g, y + MENU_ROW_H - 1);
     } else {
         g.setTextSize(2);
@@ -832,18 +833,18 @@ static void paintListRow(LovyanGFX& g, int slot, const RowPaint& row,
         // growing wider can also shorten a long label beside it.
         if (labelChanged) {
             int width = max(previous.labelWidth, row.labelWidth);
-            if (width > 0) g.fillRect(32, y + 5, width, g.fontHeight(), row.bg);
+            if (width > 0) g.fillRect(32, y + MENU_TEXT_Y, width, g.fontHeight(), row.bg);
         }
         if (valueChanged) {
             int left = min(previous.valueLeft, row.valueLeft);
-            if (left < 314) g.fillRect(left, y + 5, 315 - left, g.fontHeight(), row.bg);
+            if (left < 314) g.fillRect(left, y + MENU_TEXT_Y, 315 - left, g.fontHeight(), row.bg);
         }
     }
     if (labelChanged && !row.label.isEmpty()) {
-        txt(g, row.label.c_str(), 32, y + 5, row.labelColor, 2);
+        txt(g, row.label.c_str(), 32, y + MENU_TEXT_Y, row.labelColor, 2);
     }
     if (valueChanged && !row.value.isEmpty()) {
-        txtR(g, row.value.c_str(), 314, y + 5, row.valueColor, 2);
+        txtR(g, row.value.c_str(), 314, y + MENU_TEXT_Y, row.valueColor, 2);
     }
     if (display) {
         previous = row;
@@ -981,7 +982,12 @@ static String acActionText(const EntityState& e) {
 static String acAuxText(const EntityState& e) {
     if (e.aux.id.isEmpty() || !e.aux.available) return "--";
     switch (e.aux.type) {
-        case EntityType::Light:
+        case EntityType::Light: {
+            if (!e.aux.on) return String("OFF");
+            if (e.aux.brightness < 0) return String("ON");
+            int pct = constrain((e.aux.brightness * 100 + 127) / 255, 0, 100);
+            return "ON " + String(pct) + "%";
+        }
         case EntityType::Switch:
             return e.aux.on ? String("ON") : String("OFF");
         case EntityType::Scene:
@@ -1080,7 +1086,9 @@ static void drawAcDetail(LovyanGFX& g, const EntityState& e, bool forceFull = tr
 //  Render
 // ---------------------------------------------------------------------
 static void renderAll(LovyanGFX& g) {
-    g.fillScreen(g_theme.bg);
+    g.setFont(&fonts::Font0);
+    // Clear to black before repainting the final theme colors.
+    g.fillScreen(TFT_BLACK);
     drawStatusBar(g);
 
     if (acDetailActive()) {
@@ -1099,7 +1107,7 @@ static void renderInitial() {
 
 static void redrawContent() {
     M5.Display.startWrite();
-    M5.Display.fillRect(0, SB_H, SCR_W, SCR_H - SB_H, g_theme.bg);
+    M5.Display.fillRect(0, SB_H, SCR_W, SCR_H - SB_H, TFT_BLACK);
     if (acDetailActive()) {
         drawAcDetail(M5.Display, acEntity());
     } else {
@@ -1227,6 +1235,7 @@ static void onHaState(const EntityState& state) {
             card.aux.on = state.on;
             card.aux.available = state.available;
             card.aux.brightness = state.brightness;
+            card.aux.brightnessAdjustable = state.brightnessAdjustable;
             if (i / GRID_SLOTS == g_page || (g_detail && i == g_detailGlobal)) {
                 g_dirty[i] = true;
             }
@@ -1440,6 +1449,7 @@ static void acAuxAction() {
 
 static void acTempAction() {
     EntityState& e = acEntity();
+    if (!e.available || !e.temperatureAdjustable) return;
     if (!g_acEditing) {
         g_acEditing = true;
         g_acDraftTemp = validTemp(e.target) ? e.target
@@ -1452,11 +1462,10 @@ static void acTempAction() {
 
     float value = constrain(g_acDraftTemp, e.minTemp, e.maxTemp);
     char extra[40];
-    snprintf(extra, sizeof(extra), "\"temperature\":%.1f", value);
+    snprintf(extra, sizeof(extra), "\"temperature\":%.2f", value);
     bool ok = callService("climate", "set_temperature", e.id, extra);
     if (ok) {
         e.target = value;
-        e.on = true;
         g_acEditing = false;
         redrawAcDetail();
         scheduleRefresh();
@@ -1539,41 +1548,54 @@ static void primaryAction() {
     redrawStatusRegions();
 }
 
-static void adjustSelected(int delta) {
-    EntityState& e = selectedEntity();
-    if (e.id.isEmpty()) return;
+template<class Light> static bool adjustLightBrightness(Light& e, int delta) {
+    if (!delta || e.id.isEmpty() || !e.available || !e.brightnessAdjustable) return false;
+    int current = e.on ? (e.brightness < 0 ? 50 : (e.brightness * 100 + 127) / 255) : 0;
+    int pct = constrain(current + delta * 10, 0, 100);
+    if (pct == current) return false;
+    String extra = pct ? "\"brightness_pct\":" + String(pct) : String("");
+    if (!callService(entityDomain(e.id), pct ? "turn_on" : "turn_off", e.id, extra)) return false;
+    e.on = pct > 0;
+    e.state = e.on ? "on" : "off";
+    e.brightness = (pct * 255 + 50) / 100;
+    return true;
+}
 
-    if (e.type == EntityType::Light) {
-        int pct = lightPercent(e);
-        if (pct < 0) pct = e.on ? 50 : 0;
-        pct = constrain(pct + delta * 10, 0, 100);
-        bool ok = callService(entityDomain(e.id), "turn_on", e.id,
-                              "\"brightness_pct\":" + String(pct));
-        if (ok) {
-            e.on = pct > 0;
-            e.state = e.on ? "on" : "off";
-            e.brightness = (pct * 255 + 50) / 100;
-            scheduleRefresh();
-        }
-    } else if (e.type == EntityType::Climate) {
-        float target = validTemp(e.target) ? e.target : 22.0f;
-        target = constrain(target + delta * 0.5f, 5.0f, 35.0f);
-        char extra[40];
-        snprintf(extra, sizeof(extra), "\"temperature\":%.1f", target);
-        bool ok = callService(entityDomain(e.id), "set_temperature", e.id, extra);
-        if (ok) {
-            e.target = target;
-            e.on = true;
-            scheduleRefresh();
-        }
+static bool adjustClimateTemperature(EntityState& e, int delta) {
+    if (!delta || e.id.isEmpty() || !e.available || !e.temperatureAdjustable) return false;
+    if (!isfinite(e.minTemp) || !isfinite(e.maxTemp) || e.minTemp > e.maxTemp) return false;
+    float step = isfinite(e.tempStep) && e.tempStep > 0 ? e.tempStep : 0.5f;
+    float base = validTemp(e.target) ? e.target : (validTemp(e.current) ? e.current : 22.0f);
+    float target = constrain(base + delta * step, e.minTemp, e.maxTemp);
+    if (validTemp(e.target) && fabsf(target - e.target) < 0.0001f) return false;
+    char extra[48];
+    snprintf(extra, sizeof(extra), "\"temperature\":%.2f", target);
+    if (!callService("climate", "set_temperature", e.id, extra)) return false;
+    e.target = target;
+    return true;
+}
+
+static void adjustSelected(int delta) {
+    if (acDetailActive()) {
+        if (g_acCursor == 1) {
+            if (g_acEditing) {
+                acAdjust(delta); // Preserve explicit edit/confirm behavior.
+                return;
+            }
+            if (!adjustClimateTemperature(acEntity(), delta)) return;
+            redrawAcRow(1);
+        } else if (g_acCursor == 5 && acEntity().aux.type == EntityType::Light) {
+            if (!adjustLightBrightness(acEntity().aux, delta)) return;
+            redrawAcRow(5);
+        } else return;
     } else {
-        return;
-    }
-    if (g_detail) {
-        redrawAcDetail();
-    } else {
+        EntityState& e = selectedEntity();
+        bool changed = e.type == EntityType::Light ? adjustLightBrightness(e, delta)
+                       : (e.type == EntityType::Climate && adjustClimateTemperature(e, delta));
+        if (!changed) return;
         redrawRow(g_focus, true);
     }
+    scheduleRefresh();
     redrawStatusRegions();
 }
 
@@ -1624,14 +1646,16 @@ static void handleKey(char c) {
         changePage(c == 'M' ? -1 : +1);
         return;
     }
+    if (c == '+' || c == '-') {
+        adjustSelected(c == '+' ? +1 : -1);
+        return;
+    }
 
     if (acDetailActive()) {
         switch (c) {
             case 'w': case 'a': acMove(-1); break;
             case 's': case 'd': acMove(+1); break;
             case 'e': case '=': case '\r': acAction(); break;
-            case '+': acAdjust(+1); break;
-            case '-': acAdjust(-1); break;
             case '0': case 'b':
                 if (g_acEditing) {
                     g_acEditing = false;
@@ -1669,8 +1693,6 @@ static void handleKey(char c) {
         case '.': openDetail(); break;
         case 'p': changePage(-1); break;
         case 'n': changePage(+1); break;
-        case '+': adjustSelected(+1); break;
-        case '-': adjustSelected(-1); break;
 
         default:
             if (c >= '1' && c <= '9') directSelect(c - '1');
@@ -1823,6 +1845,7 @@ static void refreshTick() {
                     g_cards[index].aux.on = auxState.on;
                     g_cards[index].aux.available = auxState.available;
                     g_cards[index].aux.brightness = auxState.brightness;
+                    g_cards[index].aux.brightnessAdjustable = auxState.brightnessAdjustable;
                 }
             }
             // Cache every page, redraw only rows on the visible page.

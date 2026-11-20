@@ -51,12 +51,14 @@ Deno.serve({ port: 8123, hostname: "0.0.0.0" }, (req) => {
 
   if (upgrade === "websocket") {
     const { socket, response } = Deno.upgradeWebSocket(req);
+    const clockTimers = new Map<number, number>();
     socket.onopen = () => {
       sockets.add(socket);
       console.log("[ws] open");
       socket.send(JSON.stringify({ type: "auth_required", ha_version: "mock" }));
     };
     socket.onclose = () => {
+      for (const timer of clockTimers.values()) clearInterval(timer);
       sockets.delete(socket);
       console.log("[ws] close");
     };
@@ -68,6 +70,21 @@ Deno.serve({ port: 8123, hostname: "0.0.0.0" }, (req) => {
       } else if (msg.type === "subscribe_events") {
         socket.send(JSON.stringify({ id: msg.id, type: "result", success: true, result: null }));
         setTimeout(broadcastState, 800);
+      } else if (msg.type === "render_template") {
+        // The device's clock subscription; do not evaluate arbitrary templates.
+        socket.send(JSON.stringify({ id: msg.id, type: "result", success: true, result: null }));
+        const sendClock = () => {
+          if (socket.readyState !== WebSocket.OPEN) return;
+          socket.send(JSON.stringify({ id: msg.id, type: "event", event: { result: {
+            epoch: Math.floor(Date.now() / 1000), utc_offset: 0, time_zone: "UTC",
+          } } }));
+        };
+        sendClock();
+        clockTimers.set(msg.id, setInterval(sendClock, 60000));
+      } else if (msg.type === "unsubscribe_events") {
+        clearInterval(clockTimers.get(msg.subscription));
+        clockTimers.delete(msg.subscription);
+        socket.send(JSON.stringify({ id: msg.id, type: "result", success: true, result: null }));
       } else if (msg.type === "call_service") {
         socket.send(JSON.stringify({ id: msg.id, type: "result", success: true, result: null }));
       }

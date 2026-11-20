@@ -5,13 +5,45 @@
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
 #include <WebSocketsClient.h>
+#include <esp_timer.h>
 
 #include "app_config.h"
+#include "ha_clock.h"
 
 static WebSocketsClient ws;
 static bool g_wsStarted = false;
 static bool g_wsAuthed = false;
 static uint32_t g_wsMessageId = 1;
+static uint32_t g_wsClockId = 0;
+static uint32_t g_clockRetryAt = 0;
+static HaClock g_haClock;
+static String g_haTimeZone;
+
+static uint64_t clockMillis() { return esp_timer_get_time() / 1000; }
+
+bool haGetLocalTime(struct tm& timeinfo) {
+    return g_haClock.localTime(clockMillis(), timeinfo);
+}
+
+String haTimeZone() { return g_haTimeZone.isEmpty() ? String("Unavailable") : g_haTimeZone; }
+
+String haLocalTimeText() {
+    struct tm value;
+    if (!haGetLocalTime(value)) return String("Unavailable");
+    char text[24];
+    strftime(text, sizeof(text), "%Y-%m-%dT%H:%M:%S", &value);
+    return String(text);
+}
+
+String haClockStatus() {
+    String text = "time_source=" + String(g_haClock.ready() ? "ha" : "unavailable");
+    text += " ha_timezone=" + haTimeZone();
+    text += " utc_offset=" + String(g_haClock.offsetSeconds());
+    text += " local_time=" + haLocalTimeText();
+    text += " ha_clock_age=" + String(g_haClock.ready()
+            ? static_cast<long>(g_haClock.ageMs(clockMillis()) / 1000) : -1L);
+    return text;
+}
 
 static HaStateCallback g_stateCb = nullptr;
 static HaStatusCallback g_statusCb = nullptr;
@@ -125,8 +157,28 @@ static bool parseState(EntityState& e, JsonVariantConst obj) {
 
     e.unit = asciiText(attrs["unit_of_measurement"].as<String>());
     e.brightness = attrs["brightness"] | -1;
+    e.brightnessAdjustable = false;
+    if (e.type == EntityType::Light) {
+        JsonArrayConst modes = attrs["supported_color_modes"].as<JsonArrayConst>();
+        if (!modes.isNull() && modes.size()) {
+            for (JsonVariantConst item : modes) {
+                String mode = item.as<String>();
+                if (mode != "onoff" && mode != "unknown" && !mode.isEmpty()) {
+                    e.brightnessAdjustable = true;
+                }
+            }
+        } else {
+            // Older integrations may omit color modes and advertise the old
+            // SUPPORT_BRIGHTNESS bit, or expose a current brightness instead.
+            e.brightnessAdjustable = e.brightness >= 0 ||
+                                     ((attrs["supported_features"] | 0U) & 1U);
+        }
+    }
     e.current = attrs["current_temperature"] | NAN;
     e.target = attrs["temperature"] | NAN;
+    e.temperatureAdjustable = e.type == EntityType::Climate &&
+        (((attrs["supported_features"] | 0U) & 1U) ||
+         (attrs["supported_features"].isNull() && !attrs["temperature"].isNull()));
 
     e.hvacAction = attrs["hvac_action"].as<String>();
     e.hvacModes = joinArray(attrs["hvac_modes"]);
@@ -318,6 +370,39 @@ static void wsSendJson(JsonDocument& doc) {
     ws.sendTXT(out);
 }
 
+static void wsSubscribeClock() {
+    JsonDocument doc;
+    g_wsClockId = g_wsMessageId++;
+    doc["id"] = g_wsClockId;
+    doc["type"] = "render_template";
+    doc["template"] = "{% set t = now() %}{{ {'epoch': as_timestamp(t) | int, "
+                      "'utc_offset': t.utcoffset().total_seconds() | int, "
+                      "'time_zone': t.tzinfo | string} | to_json }}";
+    doc["report_errors"] = true;
+    wsSendJson(doc);
+    g_clockRetryAt = millis() + 180000;
+}
+
+static bool syncClock(JsonVariantConst result) {
+    JsonDocument parsed;
+    if (result.is<const char*>()) {
+        if (deserializeJson(parsed, result.as<const char*>())) return false;
+        result = parsed.as<JsonVariantConst>();
+    }
+    if (!result["epoch"].is<int64_t>() || !result["utc_offset"].is<int32_t>() ||
+        !result["time_zone"].is<const char*>()) return false;
+    String zone = result["time_zone"].as<String>();
+    if (zone.isEmpty() || zone.length() > 96) return false;
+    if (!g_haClock.sync(result["epoch"].as<int64_t>(),
+                        result["utc_offset"].as<int32_t>(), clockMillis())) return false;
+    bool changed = zone != g_haTimeZone;
+    g_haTimeZone = zone;
+    g_clockRetryAt = millis() + 180000;
+    if (changed) Serial.printf("[ha] clock zone=%s offset=%ld\n", zone.c_str(),
+                               static_cast<long>(g_haClock.offsetSeconds()));
+    return true;
+}
+
 static void wsSubscribe() {
     JsonDocument doc;
     doc["id"] = g_wsMessageId++;
@@ -346,6 +431,7 @@ static void wsHandleText(const uint8_t* payload, size_t length) {
         notifyStatus(true);
         Serial.println("[ha] ws authenticated");
         wsSubscribe();
+        wsSubscribeClock();
         if (g_authCb) g_authCb();
         return;
     }
@@ -355,6 +441,21 @@ static void wsHandleText(const uint8_t* payload, size_t length) {
         notifyStatus(false);
         Serial.println("[ha] auth invalid, will retry");
         ws.disconnect();
+        return;
+    }
+
+    uint32_t id = doc["id"] | 0U;
+    if (g_wsClockId && id == g_wsClockId) {
+        if (type == "event") {
+            if (!syncClock(doc["event"]["result"])) {
+                Serial.println("[ha] clock update invalid; will retry");
+                g_clockRetryAt = millis() + 30000;
+            }
+        } else if (type == "result" && !(doc["success"] | false)) {
+            g_wsClockId = 0;
+            g_clockRetryAt = millis() + 30000;
+            Serial.println("[ha] clock subscription failed; will retry");
+        }
         return;
     }
 
@@ -377,10 +478,12 @@ static void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
     switch (type) {
         case WStype_CONNECTED:
             g_wsAuthed = false;
+            g_wsClockId = 0;
             Serial.println("[ha] ws connected");
             break;
         case WStype_DISCONNECTED:
             g_wsAuthed = false;
+            g_wsClockId = 0;
             notifyStatus(false);
             Serial.println("[ha] ws disconnected");
             break;
@@ -432,6 +535,16 @@ void haBegin() {
 
 void haLoop() {
     if (g_wsStarted) ws.loop();
+    if (g_wsAuthed && (int32_t)(millis() - g_clockRetryAt) >= 0) {
+        if (g_wsClockId) {
+            JsonDocument doc;
+            doc["id"] = g_wsMessageId++;
+            doc["type"] = "unsubscribe_events";
+            doc["subscription"] = g_wsClockId;
+            wsSendJson(doc);
+        }
+        wsSubscribeClock();
+    }
 }
 
 bool haWsConnected() {

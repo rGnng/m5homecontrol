@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <time.h>
 
 enum class EntityType : uint8_t {
     Unknown,
@@ -23,6 +24,7 @@ struct AuxEntity {
     bool on = false;
     bool available = false;
     int brightness = -1;
+    bool brightnessAdjustable = false;
 };
 
 struct EntityState {
@@ -36,6 +38,8 @@ struct EntityState {
     bool on = false;
     bool available = false;
     int brightness = -1;
+    bool brightnessAdjustable = false;
+    bool temperatureAdjustable = false;
     float current = NAN;
     float target = NAN;
 
@@ -67,6 +71,10 @@ String asciiText(const String& text);
 void haBegin();
 void haLoop();
 bool haWsConnected();
+bool haGetLocalTime(struct tm& timeinfo);
+String haTimeZone();
+String haLocalTimeText();
+String haClockStatus();
 void haSetStateCallback(HaStateCallback cb);
 void haSetStatusCallback(HaStatusCallback cb);
 void haSetAuthCallback(HaAuthCallback cb);
