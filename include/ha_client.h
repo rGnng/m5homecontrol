@@ -57,6 +57,7 @@ struct EntityState {
 typedef void (*HaStateCallback)(const EntityState& state);
 typedef void (*HaStatusCallback)(bool online);
 typedef void (*HaAuthCallback)();
+typedef void (*HaCommandCallback)();
 
 EntityType entityTypeFromId(const String& id);
 String defaultNameFromId(const String& id);
@@ -69,6 +70,7 @@ bool haWsConnected();
 void haSetStateCallback(HaStateCallback cb);
 void haSetStatusCallback(HaStatusCallback cb);
 void haSetAuthCallback(HaAuthCallback cb);
+void haSetCommandCallback(HaCommandCallback cb);
 
 bool haFetchState(EntityState& entity);
 bool haFetchEntityOptions(String& optionsHtml, int maxOptions = 300);

@@ -16,6 +16,7 @@ static uint32_t g_wsMessageId = 1;
 static HaStateCallback g_stateCb = nullptr;
 static HaStatusCallback g_statusCb = nullptr;
 static HaAuthCallback g_authCb = nullptr;
+static HaCommandCallback g_commandCb = nullptr;
 
 // ---------------------------------------------------------------------
 //  Helpers
@@ -196,6 +197,7 @@ static bool httpRequest(const String& method, const String& path,
         code = http.GET();
     } else {
         http.addHeader("Content-Type", "application/json");
+        if (g_commandCb) g_commandCb();
         code = http.POST(body);
     }
 
@@ -446,4 +448,8 @@ void haSetStatusCallback(HaStatusCallback cb) {
 
 void haSetAuthCallback(HaAuthCallback cb) {
     g_authCb = cb;
+}
+
+void haSetCommandCallback(HaCommandCallback cb) {
+    g_commandCb = cb;
 }

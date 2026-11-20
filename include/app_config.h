@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 
+static constexpr const char* OTA_PASSWORD = "haremote";
+
 static constexpr int GRID_SLOTS = 8;
 static constexpr int MAX_PAGES = 12;
 static constexpr int MAX_ENTITIES = MAX_PAGES * GRID_SLOTS;
@@ -51,8 +53,7 @@ void networkBegin();
 void networkLoop();
 bool configModeActive();
 String networkIp();
-
-// Show the battery level on the Faces Bottom3 side LEDs for two seconds.
-void sideLedsPreview();
+String commandLedsStatus();
+String menuStatus();
 
 void appConfigHandleCommand(const String& line);

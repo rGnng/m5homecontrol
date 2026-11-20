@@ -6,14 +6,18 @@
 #include <M5Unified.h>
 #include <WiFi.h>
 #include <ArduinoOTA.h>
-#include <Wire.h>
 #include <time.h>
 #include <math.h>
 #include <esp_heap_caps.h>
+#include <atomic>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include <utility/led/LED_Strip_Class.hpp>
 
 #include "app_config.h"
+#include "power_status.h"
+#include "side_led_bus.h"
 #include "ha_client.h"
 #include "sfx_data.h"
 
@@ -56,6 +60,7 @@ struct ThemeColors {
     uint16_t accentMedia, accentSensor, accentCover;
     uint16_t iconWell, barTrack;
     uint16_t editBg, editText;
+    uint16_t commandLedColor;
     bool dotted;
 };
 
@@ -73,6 +78,7 @@ static void applyTheme() {
             C_MAGENTA, C_ORANGE, C_CYAN,
             0x2104, 0x2945,
             TFT_MAROON, C_YELLOW,
+            C_GREEN,
             false
         };
     } else {
@@ -86,6 +92,7 @@ static void applyTheme() {
             F_DARK, F_DARK, F_DARK,
             F_ICON, F_TRACK,
             F_DARK, F_CREAM,
+            F_ORANGE,
             true
         };
     }
@@ -125,6 +132,11 @@ static int pageCount() {
     return constrain((int)g_config.pageCount, 1, MAX_PAGES);
 }
 
+String menuStatus() {
+    return "page=" + String(g_page + 1) + " pages=" + String(pageCount()) +
+           " focus=" + String(g_focus + 1);
+}
+
 static int globalSlot(int slot) {
     return g_page * GRID_SLOTS + slot;
 }
@@ -153,27 +165,23 @@ static uint32_t g_lastKeyTime = 0;
 static char g_lastKey = 0;
 
 static void keypadInit() {
-    Wire.begin(21, 22, 100000);
-    Wire.beginTransmission(0x08);
-    uint8_t err = Wire.endTransmission();
-    Serial.printf("[keypad] i2c 0x08 %s\n", err == 0 ? "present" : "missing");
+    // The keypad and IP5306 share GPIO21/22 on Core Basic. M5.begin()
+    // already owns this bus; Wire.begin() would install a second driver.
+    bool present = M5.In_I2C.scanID((uint8_t)0x08, 100000);
+    Serial.printf("[keypad] i2c 0x08 %s\n", present ? "present" : "missing");
 }
 
 static uint8_t keypadReadByte() {
     // New Calculator3 uses register 0x00; older MEGA328 panels answer a
     // plain request. Try both so either panel works.
-    Wire.beginTransmission(0x08);
-    Wire.write((uint8_t)0x00);
-    if (Wire.endTransmission(false) == 0) {
-        if (Wire.requestFrom((uint8_t)0x08, (uint8_t)1) == 1) {
-            uint8_t value = Wire.read();
-            if (value != 0) return value;
-        }
+    uint8_t value = 0;
+    if (M5.In_I2C.readRegister(0x08, 0x00, &value, 1, 100000) && value != 0) {
+        return value;
     }
-    if (Wire.requestFrom((uint8_t)0x08, (uint8_t)1) == 1) {
-        return Wire.read();
-    }
-    return 0;
+    if (!M5.In_I2C.start(0x08, true, 100000)) return 0;
+    bool readOk = M5.In_I2C.read(&value, 1, true);
+    bool stopOk = M5.In_I2C.stop();
+    return readOk && stopOk ? value : 0;
 }
 
 static char keypadPoll() {
@@ -197,157 +205,104 @@ static char keypadPoll() {
     return c;
 }
 
-// ---------------------------------------------------------------------
-//  Faces Bottom3 side LEDs (10 x SK6812, 5 on each side)
-// ---------------------------------------------------------------------
-static constexpr int SIDE_LED_COUNT = 10;
-static bool g_sideLedsReady = false;
-static bool g_sideLedInitOk = false;
-static int g_sideLedPin = -1;
-static bool g_sideLedTimer = false;
-static uint32_t g_sideLedOffAt = 0;
-static uint32_t g_lastDockPoll = 0;
-static bool g_dockPrev = false;
+// The LED task owns all runtime strip writes, including while HA HTTP blocks.
+static constexpr uint32_t COMMAND_LED_DURATION_MS = 300;
+static TaskHandle_t g_commandLedTask = nullptr;
+static std::atomic<uint8_t> g_commandLedBrightness{0};
+static std::atomic<bool> g_commandLedActive{false};
+static std::atomic<uint32_t> g_commandLedCount{0};
+static std::atomic<uint32_t> g_commandLedFrames{0};
+static std::atomic<uint16_t> g_commandLedPixels{0};
 
-static void sideLedsInit() {
-    auto board = M5.getBoard();
-    if (board != m5::board_t::board_M5Stack &&
-        board != m5::board_t::board_M5StackCore2) {
-        Serial.printf("[led] unsupported board %d\n", (int)board);
-        return;
-    }
-
-    auto* strip = static_cast<m5::LED_Strip_Class*>(M5.Led.getLedInstancePtr());
-    if (!strip) {
-        Serial.println("[led] no LED instance");
-        return;
-    }
-
-    auto cfg = strip->getConfig();
-    cfg.led_count = SIDE_LED_COUNT;
-    cfg.color_order = m5::LED_Strip_Class::config_t::color_order_grb;
-    strip->setConfig(cfg);
-
-    g_sideLedPin = (int)M5.getPin(m5::pin_name_t::rgb_led);
-    g_sideLedInitOk = M5.Led.begin();
-    g_sideLedsReady = g_sideLedInitOk;
-
-    if (g_sideLedInitOk) {
-        M5.Led.setBrightness(96);
+static void commandLedTask(void*) {
+    constexpr uint32_t STEP_MS = COMMAND_LED_DURATION_MS / 6;
+    uint32_t color = 0;
+    for (;;) {
+        if (xTaskNotifyWait(0, UINT32_MAX, &color, portMAX_DELAY) != pdTRUE) continue;
+        uint32_t startedAt = millis();
+        uint32_t frames = 0;
+        uint16_t pixels = 0;
+        g_commandLedActive.store(true);
+        for (;;) {
+            uint32_t elapsed = millis() - startedAt;
+            if (elapsed >= COMMAND_LED_DURATION_MS) break;
+            uint32_t brightness = g_commandLedBrightness.load();
+            M5.Led.setAllColor(0, 0, 0);
+            for (int row = 0; row < 5; ++row) {
+                int distance = (int)(elapsed * 255 / STEP_MS) - row * 255;
+                int intensity = distance < 0 ? 255 + distance : 255 - distance / 2;
+                intensity = constrain(intensity, 0, 255);
+                auto scale = [&](uint8_t channel) -> uint8_t {
+                    return (channel * brightness * intensity + 32512) / 65025;
+                };
+                uint8_t r = scale((color >> 16) & 255);
+                uint8_t g = scale((color >> 8) & 255);
+                uint8_t b = scale(color & 255);
+                // Indices 0 and 9 are at the top; 4 and 5 are at the bottom.
+                int left = 4 - row;
+                int right = 5 + row;
+                M5.Led.setColor(left, r, g, b);
+                M5.Led.setColor(right, r, g, b);
+                if (r || g || b) pixels |= (1u << left) | (1u << right);
+            }
+            M5.Led.display();
+            ++frames;
+            // A new command immediately restarts the sweep from the bottom.
+            // Notification output can change even on timeout. Only accept a
+            // new color when an actual command notification was received.
+            uint32_t nextColor = 0;
+            if (xTaskNotifyWait(0, UINT32_MAX, &nextColor, pdMS_TO_TICKS(20)) == pdTRUE) {
+                color = nextColor;
+                startedAt = millis();
+                frames = 0;
+                pixels = 0;
+            }
+        }
         M5.Led.setAllColor(0, 0, 0);
         M5.Led.display();
+        g_commandLedFrames.store(frames);
+        g_commandLedPixels.store(pixels);
+        g_commandLedActive.store(false);
     }
-
-    Serial.printf("[led] count=%u pin=%d init=%d\n",
-                  (unsigned)M5.Led.getCount(), g_sideLedPin, (int)g_sideLedInitOk);
 }
 
-String sideLedsStatus() {
-    String text = "ready=" + String((int)g_sideLedsReady);
-    text += " init=" + String((int)g_sideLedInitOk);
-    text += " pin=" + String(g_sideLedPin);
-    text += " count=" + String((unsigned)M5.Led.getCount());
+static void initCommandLeds() {
+    auto board = M5.getBoard();
+    if (board != m5::board_t::board_M5Stack &&
+        board != m5::board_t::board_M5StackCore2) return;
+    auto* strip = static_cast<m5::LED_Strip_Class*>(M5.Led.getLedInstancePtr());
+    if (!strip) return;
+    auto config = strip->getConfig();
+    config.led_count = 10;
+    strip->setConfig(config);
+#if M5UNIFIED_RMT_VERSION == 1
+    strip->setBus(std::make_shared<SideLedBus>((int)M5.getPin(m5::pin_name_t::rgb_led)));
+#endif
+    M5.Led.setAutoDisplay(false);
+    if (M5.Led.begin()) {
+        // Scale RGB directly: M5.Led's brightness curve would round a 5%
+        // screen setting almost to black if the same value were used there.
+        M5.Led.setBrightness(255);
+        M5.Led.setAllColor(0, 0, 0);
+        M5.Led.display();
+        if (xTaskCreate(commandLedTask, "ha-leds", 3072, nullptr, 1,
+                        &g_commandLedTask) != pdPASS) {
+            g_commandLedTask = nullptr;
+            Serial.println("[led] command animation task unavailable");
+        }
+    }
+}
+
+String commandLedsStatus() {
+    String text = "command_leds_ready=" + String(g_commandLedTask ? 1 : 0);
+    text += " command_leds_active=" + String((int)g_commandLedActive.load());
+    text += " command_leds_brightness=" + String((unsigned)g_commandLedBrightness.load());
+    text += " command_leds_duration_ms=" + String(COMMAND_LED_DURATION_MS);
+    text += " command_leds_color565=" + String(g_theme.commandLedColor, HEX);
+    text += " command_leds_count=" + String((unsigned long)g_commandLedCount.load());
+    text += " command_leds_frames=" + String((unsigned long)g_commandLedFrames.load());
+    text += " command_leds_pixels=" + String((unsigned)g_commandLedPixels.load());
     return text;
-}
-
-static bool dockPowerPresent() {
-    if (M5.getBoard() == m5::board_t::board_M5Stack) {
-        uint8_t value = 0;
-        if (M5.Power.Ip5306.readRegister(0x70, &value, 1)) {
-            return (value & 0x08) != 0;
-        }
-    }
-
-    int16_t vbus = M5.Power.getVBUSVoltage();
-    if (vbus > 4000) return true;
-
-    return M5.Power.isCharging() == m5::Power_Class::is_charging;
-}
-
-static void sideLedsShowBattery() {
-    if (!g_sideLedsReady) return;
-
-    int count = (int)M5.Led.getCount();
-    if (count <= 0) return;
-
-    int level = M5.Power.getBatteryLevel();
-    if (level < 0) level = 0;
-    if (level > 100) level = 100;
-
-    uint8_t r, g, b;
-    if (level > 60) {
-        r = 0; g = 255; b = 0;
-    } else if (level > 25) {
-        r = 255; g = 120; b = 0;
-    } else {
-        r = 255; g = 0; b = 0;
-    }
-
-    M5.Led.setBrightness(96);
-    M5.Led.setAllColor(0, 0, 0);
-
-    if (count < 4) {
-        for (int i = 0; i < count; i++) {
-            M5.Led.setColor(i, r, g, b);
-        }
-    } else {
-        int half = count / 2;
-        int lit = (level * half + 99) / 100;
-        if (lit < 1) lit = 1;
-        for (int i = 0; i < half; i++) {
-            bool on = i < lit;
-            uint8_t rr = on ? r : 0;
-            uint8_t gg = on ? g : 0;
-            uint8_t bb = on ? b : 0;
-            M5.Led.setColor(i, rr, gg, bb);
-            M5.Led.setColor(half + i, rr, gg, bb);
-        }
-    }
-
-    M5.Led.display();
-}
-
-void sideLedsPreview() {
-    sideLedsShowBattery();
-    g_sideLedTimer = true;
-    g_sideLedOffAt = millis() + 2000;
-}
-
-void sideLedsTest() {
-    if (!g_sideLedsReady) return;
-
-    M5.Led.setBrightness(255);
-    M5.Led.setAllColor(255, 255, 255);
-    M5.Led.display();
-    g_sideLedTimer = true;
-    g_sideLedOffAt = millis() + 2000;
-}
-
-static void sideLedsOff() {
-    if (!g_sideLedsReady) return;
-    M5.Led.setAllColor(0, 0, 0);
-    M5.Led.display();
-}
-
-static void sideLedsLoop() {
-    uint32_t now = millis();
-
-    // The Faces Charging3 only exposes BAT/GND on its pogo pins, so use the
-    // PMIC charge flag and VBUS (where available) as the dock signal.
-    if (now - g_lastDockPoll >= 500) {
-        g_lastDockPoll = now;
-        bool dock = dockPowerPresent();
-        if (dock && !g_dockPrev) {
-            Serial.println("[led] charging dock detected");
-            sideLedsPreview();
-        }
-        g_dockPrev = dock;
-    }
-
-    if (g_sideLedTimer && (int32_t)(now - g_sideLedOffAt) >= 0) {
-        sideLedsOff();
-        g_sideLedTimer = false;
-    }
 }
 
 static void sfxArrow() {
@@ -438,6 +393,7 @@ static void applyBacklightPercent(int percent) {
         M5.Display.setBrightness((uint8_t)pwm);
         g_appliedBrightness = pwm;
     }
+    g_commandLedBrightness.store((uint8_t)pwm);
 }
 
 static void noteActivity() {
@@ -497,6 +453,18 @@ static void scheduleTick() {
 // ---------------------------------------------------------------------
 //  Icons
 // ---------------------------------------------------------------------
+static void animateHaCommandLeds() {
+    if (!g_commandLedTask) return;
+    noteActivity();
+    scheduleTick();
+    uint16_t color = g_theme.commandLedColor;
+    uint32_t r = ((color >> 11) & 31) * 255 / 31;
+    uint32_t g = ((color >> 5) & 63) * 255 / 63;
+    uint32_t b = (color & 31) * 255 / 31;
+    g_commandLedCount.fetch_add(1);
+    xTaskNotify(g_commandLedTask, (r << 16) | (g << 8) | b, eSetValueWithOverwrite);
+}
+
 static uint16_t typeAccent(EntityType type) {
     switch (type) {
         case EntityType::Light:   return g_theme.accentLight;
@@ -692,6 +660,17 @@ static void drawBattery(LovyanGFX& g, int x, int y, int pct, bool charging) {
         return;
     }
 
+    if (pct < 0) {
+        // Unavailable telemetry must not look like a depleted battery.
+        g.drawPixel(x + 8, y + 3, mono);
+        g.drawPixel(x + 9, y + 3, mono);
+        g.drawPixel(x + 10, y + 4, mono);
+        g.drawPixel(x + 9, y + 5, mono);
+        g.drawPixel(x + 8, y + 6, mono);
+        g.drawPixel(x + 8, y + 8, mono);
+        return;
+    }
+
     int fill = (14 * constrain(pct, 0, 100)) / 100;
     if (fill > 0) g.fillRect(x + 2, y + 2, fill, 8, mono);
 }
@@ -755,7 +734,8 @@ static void drawStatusBar(LovyanGFX& g) {
     drawStatusTitle(g);
     drawStatusCenter(g);
     drawLinkIcon(g, 270, 5);
-    drawBattery(g, 294, 6, M5.Power.getBatteryLevel(), M5.Power.isCharging());
+    PowerStatus power = readPowerStatus();
+    drawBattery(g, 294, 6, power.batteryPercent, power.charging == ChargeState::Charging);
 }
 
 // ---------------------------------------------------------------------
@@ -1226,8 +1206,9 @@ static void redrawStatusRegions() {
     }
     if (g_statusBatteryDirty) {
         M5.Display.fillRect(290, 0, 30, SB_H, g_theme.barBg);
-        drawBattery(M5.Display, 294, 6, M5.Power.getBatteryLevel(),
-                    M5.Power.isCharging());
+        PowerStatus power = readPowerStatus();
+        drawBattery(M5.Display, 294, 6, power.batteryPercent,
+                    power.charging == ChargeState::Charging);
     }
     M5.Display.endWrite();
 
@@ -1948,14 +1929,16 @@ void setup() {
     M5.begin(cfg);
     M5.Speaker.setVolume(96);
     keypadInit();
-    sideLedsInit();
+    initCommandLeds();
 
-    g_lastBatteryPct = M5.Power.getBatteryLevel();
-    g_lastCharging = M5.Power.isCharging();
+    PowerStatus power = readPowerStatus();
+    g_lastBatteryPct = power.batteryPercent;
+    g_lastCharging = power.charging == ChargeState::Charging;
     g_lastWifiStatus = WiFi.status();
 
     uint8_t brightness = constrain(g_config.brightness, (uint8_t)1, (uint8_t)100);
     M5.Display.setBrightness((uint8_t)((brightness * 255 + 50) / 100));
+    g_commandLedBrightness.store((uint8_t)((brightness * 255 + 50) / 100));
 
     for (int i = 0; i < MAX_ENTITIES; i++) {
         g_cards[i] = EntityState();
@@ -1987,6 +1970,7 @@ void setup() {
     haSetStateCallback(onHaState);
     haSetStatusCallback(onHaStatus);
     haSetAuthCallback(onHaAuth);
+    haSetCommandCallback(animateHaCommandLeds);
 
     // Show the main UI immediately. Networking continues in the background.
     networkBegin();
@@ -1999,7 +1983,7 @@ void setup() {
 
 void loop() {
     M5.update();
-    sideLedsLoop();
+    readPowerStatus();
     if (M5.BtnA.isPressed() || M5.BtnB.isPressed() || M5.BtnC.isPressed()) {
         noteActivity();
     }
@@ -2021,7 +2005,7 @@ void loop() {
 
     if (!g_otaStarted && wifiNow == WL_CONNECTED) {
         ArduinoOTA.setHostname(g_config.hostname.c_str());
-        ArduinoOTA.setPassword("haremote");
+        ArduinoOTA.setPassword(OTA_PASSWORD);
         ArduinoOTA.onStart([]() { Serial.println("[ota] start"); });
         ArduinoOTA.onEnd([]() { Serial.println("[ota] end"); });
         ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
@@ -2068,8 +2052,9 @@ void loop() {
     if (millis() - lastBar > 5000) {
         lastBar = millis();
 
-        int pct = M5.Power.getBatteryLevel();
-        bool charging = M5.Power.isCharging();
+        PowerStatus power = readPowerStatus();
+        int pct = power.batteryPercent;
+        bool charging = power.charging == ChargeState::Charging;
         if (pct != g_lastBatteryPct || charging != g_lastCharging) {
             g_lastBatteryPct = pct;
             g_lastCharging = charging;

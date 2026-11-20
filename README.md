@@ -76,20 +76,71 @@ Page switching:
 - Long press **A** / **C** while the menu is visible
 - Serial `p` / `n`
 
-## Faces Bottom3 side LEDs
+## Battery and power
 
-The Faces Bottom3 has ten SK6812 LEDs, five on each side. The firmware drives
-them as a battery gauge:
+The Faces Bottom3 side LEDs briefly sweep from bottom to top on both sides when
+the device sends a Home Assistant service command. The sweep uses the active
+theme's `commandLedColor` (Flipper orange / Classic green), follows current screen
+brightness including the day/night schedule, and turns off after 300 ms.
+It runs independently of HTTP, so slow HA responses do not freeze it. A new
+command restarts the sweep. Polling and incoming state updates do not trigger it.
 
-- When charging is detected, both sides show the battery level for two seconds
-- Five LEDs per side; the bar grows with the battery percentage
-- Green above 60%, amber above 25%, red below
-- The LEDs turn off after two seconds
-- Set the Bottom3 **LED IO** switch to `G15` when using a Core Basic
-- Web -> Display -> **Test side LEDs** shows the gauge for two seconds
+The automatic battery-level bar and web LED test controls remain removed.
+A black frame clears any latched LED color at startup. `/diag` reports command
+animation readiness, brightness (0-255), duration, theme color, active state,
+trigger count, and the last sweep's frame count and visited-pixel mask
+(`1023` means all ten pixels).
 
-The Faces Charging3 pogo pins only carry `BAT` and `GND`, so the Core has no
-separate dock-detect line. Charging detection uses the PMIC charge flag.
+The on-screen battery icon remains. An unavailable battery reading shows `?`;
+it does not display an empty battery.
+
+The Bottom3 has its own TP4057 charger and a separate battery power switch.
+The Core's IP5306 readings do not directly report the TP4057 charging state.
+The four dock contacts are **J3**, wired as GND, SYS_5V, GPIO21/SDA, and
+GPIO22/SCL. **J4 is the separate battery connector**, not the dock pinout.
+Dock SYS_5V feeds the TP4057 charger and, through isolation diode D1, BUS_5V
+for the running device. The TP4057 charges BAT; with the battery switch on,
+BAT_ON feeds the Core's battery connection. Off the dock, the Core's IP5306
+boosts that battery supply to the system 5V rail. The dock therefore bypasses
+the IP5306's USB input; it does not physically disconnect the IP5306.
+The keypad shares M5Unified's I2C driver with the PMIC. `/diag` includes the bus
+pins and IP5306 registers `00`, `01`, `70`, `71`, and `78` for power troubleshooting.
+It also reports the current page and focus. It does not read the ESP32 Hall
+sensor: `hallRead()` changes GPIO39 (Button A) into analog mode and can cause a
+phantom long press that navigates to the previous page.
+
+Espressif withdrew the built-in Hall sensor as a supported feature because it
+does not work properly; see
+[PCN20221202](https://documentation.espressif.com/PCN20221202%20Remove%20Hall%20Sensor%20from%20ESP32%20Series%20of%20Documentation.pdf).
+The firmware contains no Hall-sensor sampling or experimental Hall endpoint.
+
+The firmware retries an unavailable PMIC, including after startup on the dock.
+After three failed samples it reinitializes the shared I2C bus and retries the
+PMIC, at most once per ten seconds. When the IP5306 responds, its boost keep-on
+bit is enabled to keep the battery output ready while dock power bypasses it.
+The manager also verifies boost enable, Core charge enable, and automatic boost
+handoff when the Core input is removed. Register changes use read-modify-write;
+charger voltage/current, low-battery cutoff, and reserved bits are preserved.
+A PMIC already asleep and not
+responding to I2C may still need a single press of the red power button or USB
+power to wake it.
+
+Docked telemetry may still become unavailable even with boost keep-on enabled.
+In the device test, battery handoff continued working and live readings returned
+after undocking. `?` means no current battery reading; it does not mean empty.
+
+Web -> Display -> **Refresh battery status**, or `GET /power`, reports the
+battery percentage, battery voltage, USB-input voltage, and Core USB charger.
+Voltage fields show `Unavailable` when the hardware does not expose a reading.
+In particular, the Core Basic's IP5306 has no readable battery/VBUS voltage;
+a percentage reading is not converted into a made-up voltage.
+`/diag` uses `charging=unknown` when there is no confirmed charging/full signal;
+an inactive Core charger is not proof that the dock is not charging.
+It also reports `pmic_online`, `core_keep_on`, `core_boost_enabled`,
+`core_charge_enabled`, `core_battery_handoff`, and `power_recoveries`.
+The Bottom3 TP4057's `CHRG` and `STDBY` pins are unconnected in the
+[manufacturer schematic](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1273/A168_Faces_Bottom3_Sche.pdf),
+so actual dock charging detection requires a hardware status connection.
 
 ## Backlight schedule
 
@@ -244,6 +295,30 @@ The OTA environment targets `10.0.0.217` and uses the OTA password
 The configured hostname (`ha-remote` by default) is advertised over mDNS and
 used as the OTA hostname.
 
+### HTTP firmware updates
+
+Open **Update firmware** on the configuration page, or go directly to
+`http://<device-ip>/update`. Through the existing tunnel, use
+`http://127.0.0.1:10090/update`.
+
+- Username: `admin`; password: `haremote` (the ArduinoOTA password)
+- Select `.pio/build/m5stack-core/firmware.bin`, then **Upload and restart**
+- Progress and upload errors appear on the page; only a successful update restarts
+- Existing configuration is kept
+- HTTP uploads use the existing web port, TCP 80; no UDP or callback port is needed
+
+Command-line upload through the tunnel:
+
+```sh
+firmware=.pio/build/m5stack-core/firmware.bin
+curl --fail-with-body --user admin:haremote \
+  -F "firmware=@$firmware" \
+  "http://127.0.0.1:10090/update?size=$(wc -c < "$firmware" | tr -d ' ')"
+```
+
+The first installation of firmware with this feature still requires USB or
+ArduinoOTA; older firmware does not have the `/update` endpoint.
+
 ## Files
 
 ```
@@ -251,6 +326,19 @@ platformio.ini
 src/main.cpp          menu UI, partial refresh, input
 src/app_config.cpp    NVS, network, web server, serial console
 src/ha_client.cpp     REST + WebSocket client
+src/power_status.cpp  shared power sampling, PMIC recovery, battery handoff
 include/app_config.h
 include/ha_client.h
+include/power_status.h
+```
+
+Power logic host checks (no device required):
+
+```sh
+g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
+  tools/test_power_status.cpp -o /tmp/m5-power-status-test
+/tmp/m5-power-status-test
+g++ -std=c++17 -Wall -Wextra -Werror -Itools/test_support -Iinclude \
+  src/power_status.cpp tools/test_power_recovery.cpp -o /tmp/m5-power-recovery-test
+/tmp/m5-power-recovery-test
 ```

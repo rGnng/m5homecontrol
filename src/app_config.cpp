@@ -5,8 +5,10 @@
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
+#include <Update.h>
 
 #include "ha_client.h"
+#include "power_status.h"
 
 static const char* NVS_NAMESPACE = "haremote";
 static const char* DEFAULT_HA_URL = "http://10.0.0.11:8123";
@@ -269,6 +271,28 @@ static void sendMessagePage(const String& title, const String& message) {
     server.send(200, "text/html", page);
 }
 
+static String voltageText(int millivolts) {
+    if (millivolts < 0) return "Unavailable";
+    return String(millivolts / 1000.0f, 3) + " V";
+}
+
+static String powerSummary() {
+    PowerStatus power = readPowerStatus();
+    String text = "Battery: ";
+    text += power.batteryPercent < 0 ? String("Unavailable")
+                                    : String(power.batteryPercent) + "% (approximate)";
+    text += "\nBattery voltage: " + voltageText(power.batteryMillivolts);
+    text += "\nUSB input voltage: " + voltageText(power.inputMillivolts);
+    text += "\nCore USB charger: ";
+    switch (power.coreCharging) {
+        case ChargeState::Charging: text += "Charging"; break;
+        case ChargeState::Full: text += "Full"; break;
+        case ChargeState::Inactive: text += "Inactive"; break;
+        default: text += "Unavailable"; break;
+    }
+    return text;
+}
+
 static void handleRoot() {
     static String cachedOptions;
     static uint32_t cachedAt = 0;
@@ -325,6 +349,9 @@ static void handleRoot() {
     page += "</fieldset>";
 
     page += "<fieldset><legend>Display</legend>";
+    page += "<p id=\"power-status\" role=\"status\" style=\"white-space:pre-line\">" +
+            htmlEscape(powerSummary()) + "</p>";
+    page += "<button type=\"button\" class=\"secondary\" onclick=\"refreshPower()\">Refresh battery status</button>";
     page += "<label>Theme</label><select name=\"theme\">";
     page += "<option value=\"flipper\"" +
             String(g_config.theme == 0 ? " selected" : "") + ">Flipper</option>";
@@ -333,7 +360,6 @@ static void handleRoot() {
     page += "</select>";
     page += "<label>Fallback brightness (%)</label><input name=\"bright\" type=\"number\" min=\"1\" max=\"100\" value=\"" +
             String(g_config.brightness) + "\">";
-    page += "<button type=\"button\" class=\"secondary\" onclick=\"fetch('/leds')\">Test side LEDs (2 s)</button>";
     page += "<div class=\"pagehead\">Backlight Schedule</div>";
     page += "<table><tbody>";
     page += "<tr><th></th><th>Start</th><th>End</th><th>Brightness %</th><th>Off after (s)</th></tr>";
@@ -547,6 +573,16 @@ renumberPages();
 function openConnection() {
   document.getElementById('connection-modal').classList.add('open');
 }
+async function refreshPower() {
+  const status = document.getElementById('power-status');
+  try {
+    const response = await fetch('/power', {cache: 'no-store'});
+    if (!response.ok) throw new Error('Power status unavailable');
+    status.textContent = await response.text();
+  } catch (error) {
+    status.textContent = 'Could not read battery status. Check the connection and retry.';
+  }
+}
 function closeConnection() {
   document.getElementById('connection-modal').classList.remove('open');
 }
@@ -582,6 +618,7 @@ document.querySelector('form[action="/save"]').addEventListener('submit', functi
 
     page += "<div class=\"actions bottom\"><button type=\"submit\">Save and reboot</button></div>";
     page += "</form>";
+    page += "<p><a href=\"/update\">Update firmware</a></p>";
     page += "<p style=\"margin-top:24px;color:#777\">Serial console: send <code>:help</code> at 115200 baud.</p>";
     page += htmlFooter();
 
@@ -721,27 +758,191 @@ static void handleSave() {
     ESP.restart();
 }
 
+// Only this upload may abort or finish the shared Update object. ArduinoOTA
+// also uses it, so reject a concurrent update without disturbing its owner.
+struct WebFirmwareUpload {
+    bool ownsUpdate = false;
+    bool fileEnded = false;
+    String error;
+};
+static WebFirmwareUpload g_firmwareUpload;
+
+static bool firmwareAuthenticated() {
+    return server.authenticate("admin", OTA_PASSWORD);
+}
+
+static void handleFirmwarePage() {
+    if (!firmwareAuthenticated()) {
+        server.requestAuthentication(BASIC_AUTH, "Firmware update");
+        return;
+    }
+    String page = htmlHeader("Update firmware");
+    page += R"HTML(
+<h1>Update firmware</h1>
+<p>Choose the Home Control firmware.bin for this device. Settings are kept.
+The device restarts after a successful update.</p>
+<form id="update-form" method="post" action="/update" enctype="multipart/form-data">
+<label for="firmware">Firmware (.bin)</label>
+<input id="firmware" type="file" name="firmware" accept=".bin" required>
+<button id="upload" type="submit">Upload and restart</button>
+</form>
+<p id="update-status" role="status" aria-live="polite"></p>
+<p><a href="/">Back to configuration</a></p>
+<script>
+document.getElementById('update-form').addEventListener('submit', function(event) {
+  event.preventDefault();
+  const file = document.getElementById('firmware').files[0];
+  if (!file || !file.size) return;
+  const button = document.getElementById('upload');
+  const status = document.getElementById('update-status');
+  button.disabled = true;
+  status.textContent = 'Uploading...';
+  const data = new FormData();
+  data.append('firmware', file);
+  const request = new XMLHttpRequest();
+  request.open('POST', '/update?size=' + file.size);
+  request.upload.onprogress = function(event) {
+    if (event.lengthComputable) {
+      status.textContent = 'Uploading: ' + Math.round(event.loaded * 100 / event.total) + '%';
+    }
+  };
+  request.onload = function() {
+    status.textContent = request.responseText;
+    if (request.status !== 200) button.disabled = false;
+  };
+  request.onerror = function() {
+    status.textContent = 'Connection lost. Check the device before retrying.';
+    button.disabled = false;
+  };
+  request.send(data);
+});
+</script>
+)HTML";
+    page += htmlFooter();
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(200, "text/html", page);
+}
+
+static void failFirmwareUpload(const String& error) {
+    if (g_firmwareUpload.ownsUpdate) Update.abort();
+    g_firmwareUpload.ownsUpdate = false;
+    g_firmwareUpload.error = error;
+    Serial.printf("[web-ota] %s\n", error.c_str());
+}
+
+static void handleFirmwareUpload() {
+    // Upload callbacks run before the final POST handler. Authenticate here
+    // as well so rejected requests never write to flash.
+    if (!firmwareAuthenticated()) return;
+    HTTPUpload& upload = server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+        if (g_firmwareUpload.ownsUpdate || g_firmwareUpload.fileEnded) {
+            failFirmwareUpload("Upload exactly one firmware file.");
+            return;
+        }
+        if (!g_firmwareUpload.error.isEmpty()) return;
+        String sizeArg = server.arg("size");
+        bool validSize = !sizeArg.isEmpty() && sizeArg.length() <= 10;
+        for (size_t i = 0; i < sizeArg.length(); ++i) {
+            if (sizeArg[i] < '0' || sizeArg[i] > '9') validSize = false;
+        }
+        unsigned long size = strtoul(sizeArg.c_str(), nullptr, 10);
+        if (upload.name != "firmware" || !validSize || !size ||
+            size > ESP.getFreeSketchSpace()) {
+            failFirmwareUpload("Choose one firmware file with a valid size that fits the OTA partition.");
+        } else if (Update.isRunning()) {
+            failFirmwareUpload("Another firmware update is running.");
+        } else if (!Update.begin(size, U_FLASH)) {
+            failFirmwareUpload(Update.errorString());
+        } else {
+            g_firmwareUpload.ownsUpdate = true;
+            Serial.printf("[web-ota] receiving %lu bytes\n", size);
+        }
+    } else if (upload.status == UPLOAD_FILE_WRITE && g_firmwareUpload.ownsUpdate) {
+        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+            failFirmwareUpload(Update.errorString());
+        }
+    } else if (upload.status == UPLOAD_FILE_END && g_firmwareUpload.ownsUpdate) {
+        g_firmwareUpload.fileEnded = true;
+        if (upload.totalSize != Update.size()) {
+            failFirmwareUpload("Firmware size does not match the upload size.");
+        }
+    } else if (upload.status == UPLOAD_FILE_ABORTED) {
+        failFirmwareUpload("Upload interrupted.");
+        g_firmwareUpload = WebFirmwareUpload();
+    }
+}
+
+static void handleFirmwareComplete() {
+    if (!firmwareAuthenticated()) {
+        server.requestAuthentication(BASIC_AUTH, "Firmware update");
+        return;
+    }
+    bool ok = g_firmwareUpload.ownsUpdate && g_firmwareUpload.fileEnded &&
+              g_firmwareUpload.error.isEmpty();
+    if (ok && !Update.end()) {
+        failFirmwareUpload(Update.errorString());
+        ok = false;
+    }
+    if (!ok && g_firmwareUpload.error.isEmpty()) {
+        failFirmwareUpload("No complete firmware file received.");
+    }
+    server.sendHeader("Cache-Control", "no-store");
+    server.sendHeader("Connection", "close");
+    server.send(ok ? 200 : 400, "text/plain", ok
+                    ? String("Firmware updated. Restarting; reconnect in a few seconds.")
+                    : "Update failed: " + g_firmwareUpload.error);
+    g_firmwareUpload = WebFirmwareUpload();
+    if (ok) {
+        Serial.println("[web-ota] complete; restarting");
+        delay(500);
+        server.client().stop();
+        ESP.restart();
+    }
+}
+
 static void startWebServer() {
     if (!g_routesReady) {
         server.on("/", HTTP_GET, handleRoot);
         server.on("/save", HTTP_POST, handleSave);
-        server.on("/leds", HTTP_GET, []() {
-            sideLedsPreview();
-            server.send(200, "text/plain", "ok");
+        server.on("/power", HTTP_GET, []() {
+            server.sendHeader("Cache-Control", "no-store");
+            server.send(200, "text/plain", powerSummary());
         });
+        server.on("/update", HTTP_GET, handleFirmwarePage);
+        server.on("/update", HTTP_POST, handleFirmwareComplete, handleFirmwareUpload);
         server.on("/diag", HTTP_GET, []() {
+            PowerStatus power = readPowerStatus();
             String text = "board=" + String((int)M5.getBoard());
-            text += " leds=" + String((unsigned)M5.Led.getCount());
-            text += " led_type=" + String((int)M5.Led.getLedType(0));
-            text += " charging=" + String((int)M5.Power.isCharging());
-            text += " vbus=" + String(M5.Power.getVBUSVoltage());
-            text += " battery=" + String(M5.Power.getBatteryLevel());
-            text += " hall=" + String(hallRead());
-            uint8_t reg70 = 0;
-            if (M5.Power.Ip5306.readRegister(0x70, &reg70, 1)) {
-                text += " ip5306_70=" + String(reg70);
-            } else {
-                text += " ip5306_70=na";
+            text += " " + menuStatus();
+            text += " " + commandLedsStatus();
+            text += " charging=" + String(chargeStateName(power.charging));
+            text += " core_charging=" + String(chargeStateName(power.coreCharging));
+            text += " core_input=" + String(power.coreInput);
+            text += " dock_charging=unknown dock_status_available=0";
+            text += " pmic_online=" + String((int)power.pmicOnline);
+            text += " core_keep_on=" + String(power.coreKeepOn);
+            text += " core_boost_enabled=" + String(power.coreBoostEnabled);
+            text += " core_charge_enabled=" + String(power.coreChargeEnabled);
+            text += " core_battery_handoff=" + String(power.coreBatteryHandoff);
+            text += " power_recoveries=" + String(power.recoveryAttempts);
+            text += " vbus=" + String(power.inputMillivolts);
+            text += " battery_mv=" + String(power.batteryMillivolts);
+            text += " battery=" + String(power.batteryPercent);
+            text += " i2c_sda=" + String(M5.In_I2C.getSDA());
+            text += " i2c_scl=" + String(M5.In_I2C.getSCL());
+            if (M5.getBoard() == m5::board_t::board_M5Stack) {
+                for (uint8_t reg : {0x00, 0x01, 0x70, 0x71, 0x78}) {
+                    uint8_t value = 0;
+                    text += " ip5306_";
+                    if (reg < 0x10) text += "0";
+                    text += String(reg, HEX) + "=";
+                    if (M5.Power.Ip5306.readRegister(reg, &value, 1)) {
+                        text += String(value);
+                    } else {
+                        text += "na";
+                    }
+                }
             }
             server.send(200, "text/plain", text);
         });
