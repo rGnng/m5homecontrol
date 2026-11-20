@@ -4,7 +4,7 @@ A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 
 - M5Code-style menu: eight rows per page
 - Two themes: `Flipper` (default) and `Classic`
-- NES-style 8x8 pixel font for menu rows, states, and detail values
+- Original M5Code bitmap font for menu rows, states, and detail values
 - Numbered index column, entity name, live state on the right
 - Dynamic number of pages, eight entities per page
 - Configurable page titles, default `PAGE1`, `PAGE2`, ...
@@ -238,5 +238,4 @@ src/app_config.cpp    NVS, network, web server, serial console
 src/ha_client.cpp     REST + WebSocket client
 include/app_config.h
 include/ha_client.h
-include/retro_font.h  public-domain 8x8 pixel font data
 ```

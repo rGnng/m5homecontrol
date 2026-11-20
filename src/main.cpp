@@ -13,7 +13,6 @@
 
 #include "app_config.h"
 #include "ha_client.h"
-#include "retro_font.h"
 #include "sfx_data.h"
 
 // ---------------------------------------------------------------------
@@ -212,93 +211,41 @@ static int g_appliedBrightness = -1;
 // ---------------------------------------------------------------------
 //  Text helpers
 // ---------------------------------------------------------------------
-static uint8_t retroScaleY(uint8_t size) {
-    if (size <= 1) return 1;
-    if (size == 2) return 2;
-    return 3;
-}
-
-static int retroAdvance(uint8_t size) {
-    // Body text is 1.5x wide and 2x tall. This keeps the 8x8 glyphs readable
-    // and still fits long entity names on the 320 px screen.
-    if (size <= 1) return 8;
-    if (size == 2) return 12;
-    return 24;
-}
-
-static int retroPixelX(int col, uint8_t size) {
-    if (size == 2) return (col * 3) / 2;
-    return col * retroScaleY(size);
-}
-
-static void retroText(LovyanGFX& g, const char* s, int x, int y,
-                      uint16_t color, uint8_t size, uint8_t align) {
-    if (!s || !s[0]) return;
-
-    int len = (int)strlen(s);
-    uint8_t scaleY = retroScaleY(size);
-    int advance = retroAdvance(size);
-    int width = len * advance;
-
-    if (align == 1) {
-        x -= width;                      // right
-    } else if (align == 2) {
-        x -= width / 2;                  // center
-        y -= (8 * scaleY) / 2;
-    }
-
-    for (int i = 0; i < len; i++) {
-        uint8_t c = (uint8_t)s[i];
-        if (c < 0x20 || c > 0x7E) c = '?';
-        const uint8_t* glyph = RETRO_FONT[c - 0x20];
-        int gx = x + i * advance;
-
-        for (int row = 0; row < 8; row++) {
-            uint8_t bits = pgm_read_byte(&glyph[row]);
-            int runStart = -1;
-            for (int col = 0; col <= 8; col++) {
-                bool on = (col < 8) && (bits & (0x80 >> col));
-                if (on && runStart < 0) {
-                    runStart = col;
-                } else if (!on && runStart >= 0) {
-                    int x0 = gx + retroPixelX(runStart, size);
-                    int x1 = gx + retroPixelX(col, size);
-                    g.fillRect(x0, y + row * scaleY,
-                               x1 - x0, scaleY, color);
-                    runStart = -1;
-                }
-            }
-        }
-    }
-}
-
 static void txt(LovyanGFX& g, const char* s, int x, int y,
                 uint16_t color, uint8_t size = 2) {
-    retroText(g, s, x, y, color, size, 0);
+    g.setTextDatum(TL_DATUM);
+    g.setTextSize(size);
+    g.setTextColor(color);
+    g.drawString(s, x, y);
 }
 
 static void txtC(LovyanGFX& g, const char* s, int x, int y,
                  uint16_t color, uint8_t size = 2) {
-    retroText(g, s, x, y, color, size, 2);
+    g.setTextDatum(MC_DATUM);
+    g.setTextSize(size);
+    g.setTextColor(color);
+    g.drawString(s, x, y);
 }
 
 static void txtR(LovyanGFX& g, const char* s, int x, int y,
                  uint16_t color, uint8_t size = 2) {
-    retroText(g, s, x, y, color, size, 1);
+    g.setTextDatum(TR_DATUM);
+    g.setTextSize(size);
+    g.setTextColor(color);
+    g.drawString(s, x, y);
 }
 
-// Truncate to the number of glyphs that fit, so fields never overlap.
+// Truncate by pixel width so text never overlaps the next field.
 static String fitText(LovyanGFX& g, const String& in, int maxWidth,
                       uint8_t size) {
-    (void)g;
     if (in.isEmpty() || maxWidth <= 0) return String("");
+    g.setTextSize(size);
+    if (g.textWidth(in.c_str()) <= maxWidth) return in;
 
-    int maxChars = maxWidth / retroAdvance(size);
-    if (maxChars < 2) maxChars = 2;
-    if ((int)in.length() <= maxChars) return in;
-
-    String out = in.substring(0, maxChars - 1);
-    while (out.length() && out[out.length() - 1] == ' ') {
+    String out = in;
+    while (out.length() > 1) {
+        String probe = out + "~";
+        if (g.textWidth(probe.c_str()) <= maxWidth) break;
         out.remove(out.length() - 1);
     }
     return out + "~";
@@ -640,7 +587,7 @@ static void drawStatusTitle(LovyanGFX& g) {
         if (title.isEmpty()) title = "PAGE" + String(g_page + 1);
     }
     title = fitText(g, title, 86, 2);
-    txt(g, title.c_str(), 6, 4, g_theme.barText, 2);
+    txt(g, title.c_str(), 6, 5, g_theme.barText, 2);
 }
 
 static void drawStatusCenter(LovyanGFX& g) {
@@ -685,7 +632,7 @@ static void drawMenuRow(LovyanGFX& g, int slot, const EntityState& e, bool selec
     }
 
     char number[2] = { char('1' + slot), 0 };
-    txt(g, number, 6, y + 6, numberFg, 2);
+    txt(g, number, 6, y + 5, numberFg, 2);
 
     if (slot < GRID_SLOTS - 1) {
         drawThemeDivider(g, y + MENU_ROW_H - 1);
@@ -695,13 +642,13 @@ static void drawMenuRow(LovyanGFX& g, int slot, const EntityState& e, bool selec
     if (empty) return;
 
     String state = fitText(g, entityStateText(e), 140, 2);
-    int nameWidth = 314 - 32 - 8 - (int)state.length() * retroAdvance(2);
+    int nameWidth = 314 - 32 - 8 - (int)g.textWidth(state.c_str());
     if (nameWidth < 90) nameWidth = 90;
     String name = fitText(g, displayName(e), nameWidth, 2);
 
-    txt(g, name.c_str(), 32, y + 6,
+    txt(g, name.c_str(), 32, y + 5,
         selected ? g_theme.rowSelText : g_theme.rowText, 2);
-    txtR(g, state.c_str(), 314, y + 6,
+    txtR(g, state.c_str(), 314, y + 5,
          selected ? g_theme.rowSelText : entityStateColor(e), 2);
 }
 
@@ -869,7 +816,7 @@ static void drawAcRow(LovyanGFX& g, int slot, const String& label,
     }
 
     char number[2] = { char('1' + slot), 0 };
-    txt(g, number, 6, y + 6, numberFg, 2);
+    txt(g, number, 6, y + 5, numberFg, 2);
 
     if (slot < GRID_SLOTS - 1) {
         drawThemeDivider(g, y + MENU_ROW_H - 1);
@@ -880,12 +827,12 @@ static void drawAcRow(LovyanGFX& g, int slot, const String& label,
     uint16_t valueColor = editing ? g_theme.editText
                                   : (selected ? g_theme.rowSelText : g_theme.text);
     String labelText = fitText(g, label, 128, 2);
-    int valueWidth = 314 - 32 - 8 - (int)labelText.length() * retroAdvance(2);
+    int valueWidth = 314 - 32 - 8 - (int)g.textWidth(labelText.c_str());
     if (valueWidth < 80) valueWidth = 80;
     String valueText = fitText(g, value, valueWidth, 2);
 
-    txt(g, labelText.c_str(), 32, y + 6, labelColor, 2);
-    txtR(g, valueText.c_str(), 314, y + 6, valueColor, 2);
+    txt(g, labelText.c_str(), 32, y + 5, labelColor, 2);
+    txtR(g, valueText.c_str(), 314, y + 5, valueColor, 2);
 }
 
 static String acLabelFor(const EntityState& e, int index, int slot) {
@@ -969,13 +916,10 @@ static String detailCaption(const EntityState& e) {
 static void drawDetailHeader(LovyanGFX& g, const EntityState& e) {
     txt(g, typeLabel(e.type), 12, 31, g_theme.dim, 1);
 
-    String state = fitText(g, entityStateText(e), 100, 2);
-    int nameWidth = 308 - 12 - 8 - (int)state.length() * retroAdvance(2);
-    if (nameWidth < 90) nameWidth = 90;
-    String name = fitText(g, displayName(e), nameWidth, 2);
-
-    txt(g, name.c_str(), 12, 43, g_theme.text, 2);
-    txtR(g, state.c_str(), 308, 43, entityStateColor(e), 2);
+    String name = fitText(g, displayName(e), 200, 2);
+    txt(g, name.c_str(), 12, 42, g_theme.text, 2);
+    txtR(g, shorten(entityStateText(e), 14).c_str(), 308, 44,
+         entityStateColor(e), 1);
 }
 
 static void drawDetailPanel(LovyanGFX& g, const EntityState& e) {
