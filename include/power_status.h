@@ -12,6 +12,7 @@ struct PowerStatus {
     ChargeState coreCharging = ChargeState::Unknown;
     ChargeState charging = ChargeState::Unknown;
     bool pmicOnline = false;
+    bool dockInferred = false;  // UI hint from PMIC absence; charging remains unknown
     int coreKeepOn = -1;
     int coreBoostEnabled = -1;
     int coreChargeEnabled = -1;

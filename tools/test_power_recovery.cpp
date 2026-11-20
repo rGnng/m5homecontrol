@@ -11,9 +11,10 @@ Logger Serial;
 int main() {
     auto status = readPowerStatus();
     assert(status.batteryPercent == -1 && !status.pmicOnline);
+    assert(!status.dockInferred);
     unsigned reads = M5.Power.Ip5306.reads;
     testMillis = 100;
-    readPowerStatus();
+    assert(!readPowerStatus().dockInferred);
     assert(M5.Power.Ip5306.reads == reads);
 
     // A controller coming online after boot recovers without restarting the app.
@@ -21,6 +22,7 @@ int main() {
     M5.Power.Ip5306.online = true;
     status = readPowerStatus();
     assert(status.batteryPercent == 100 && status.coreKeepOn == 1);
+    assert(!status.dockInferred);
     assert(status.recoveryAttempts == 0);
     assert(status.coreBoostEnabled == 1 && status.coreChargeEnabled == 1);
     assert(status.coreBatteryHandoff == 1);
@@ -33,12 +35,15 @@ int main() {
     M5.Power.Ip5306.online = false;
     status = readPowerStatus();
     assert(status.batteryPercent == -1);
+    assert(!status.dockInferred);
     testMillis = 1500;
-    readPowerStatus();
+    assert(!readPowerStatus().dockInferred);
     assert(M5.In_I2C.begins == 0);
     testMillis = 2000;
     status = readPowerStatus();
     assert(status.recoveryAttempts == 1 && M5.In_I2C.begins == 1);
+    assert(status.dockInferred && status.charging == ChargeState::Unknown);
+    assert(status.coreCharging == ChargeState::Unknown);
     testMillis = 2500;
     readPowerStatus();
     assert(M5.In_I2C.begins == 1);
@@ -51,11 +56,13 @@ int main() {
     testMillis = 12000;
     status = readPowerStatus();
     assert(status.recoveryAttempts == 2 && status.pmicOnline);
+    assert(!status.dockInferred);
     assert(status.batteryPercent == 100 && status.coreKeepOn == 1);
     assert(M5.Power.Ip5306.writes == 2);
     testMillis = 12500;
     M5.Power.Ip5306.input = 8;
     status = readPowerStatus();
     assert(status.charging == ChargeState::Charging);
-    std::puts("PASS: delayed startup, keep-on/handoff, preserved bits, failed reads, bounded recovery, USB transition");
+    assert(!status.dockInferred);
+    std::puts("PASS: delayed startup, keep-on/handoff, preserved bits, debounced dock hint, unknown charge status, recovery, USB transition");
 }

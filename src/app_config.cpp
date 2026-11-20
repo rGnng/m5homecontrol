@@ -47,6 +47,15 @@ static String sanitizeHostname(const String& value) {
 // ---------------------------------------------------------------------
 //  NVS
 // ---------------------------------------------------------------------
+static void normalizeAuxEntities() {
+    for (int i = 0; i < MAX_ENTITIES; i++) {
+        if (!g_config.entities[i].startsWith("climate.")) {
+            g_config.auxEntities[i] = "";
+        }
+        if (g_config.auxEntities[i].isEmpty()) g_config.auxNames[i] = "";
+    }
+}
+
 void configLoad() {
     Preferences p;
     p.begin(NVS_NAMESPACE, true);
@@ -111,9 +120,11 @@ void configLoad() {
     g_config.nightBrightness = constrain(p.getInt("nb", 5), 0, 100);
     g_config.nightOffSeconds = constrain(p.getInt("no", 0), 0, 3600);
     p.end();
+    normalizeAuxEntities();
 }
 
 bool configSave() {
+    normalizeAuxEntities();
     Preferences p;
     if (!p.begin(NVS_NAMESPACE, false)) return false;
 
@@ -246,6 +257,7 @@ static String htmlHeader(const String& title) {
     h += "td.n{width:28px;color:#777;padding-top:12px}code{background:#1a1a1a;color:#eee;padding:1px 4px}";
     h += "th{text-align:left;font-size:12px;color:#888;font-weight:600;padding:4px 0}";
     h += ".modesrow td{padding:0 0 10px}.modelabel{font-size:12px;color:#888;margin-right:8px}";
+    h += ".auxfields{display:grid;grid-template-columns:1fr 1fr;gap:8px}";
     h += "label.inline{display:inline-flex;align-items:center;gap:4px;margin:0 10px 0 0;font-size:12px;color:#aaa}";
     h += "label.inline input{width:auto;margin:0}";
     h += ".pagehead{font-weight:600;margin:18px 0 6px;color:#fff}";
@@ -407,8 +419,7 @@ static void handleRoot() {
         page += "<label>Title</label><input class=\"ptitle\" name=\"t" + String(p) +
                 "\" value=\"" + htmlEscape(g_config.pageTitles[p]) + "\">";
         page += "<table><tbody>";
-        page += "<tr><th></th><th>Entity ID</th><th>Display name</th>"
-                "<th>AUX entity</th><th>AUX name</th></tr>";
+        page += "<tr><th></th><th>Entity ID</th><th>Display name</th></tr>";
         for (int slot = 0; slot < GRID_SLOTS; slot++) {
             int index = p * GRID_SLOTS + slot;
             String value = index < g_config.entityCount
@@ -436,18 +447,10 @@ static void handleRoot() {
             page += "<input class=\"ename\" name=\"n" + String(index) +
                     "\" value=\"" + htmlEscape(name) +
                     "\" placeholder=\"optional name\">";
-            page += "</td><td>";
-            page += "<input class=\"auxentity\" name=\"x" + String(index) +
-                    "\" list=\"entity-list\" value=\"" + htmlEscape(aux) +
-                    "\" placeholder=\"optional entity\">";
-            page += "</td><td>";
-            page += "<input class=\"auxname\" name=\"y" + String(index) +
-                    "\" value=\"" + htmlEscape(auxName) +
-                    "\" placeholder=\"optional name\">";
             page += "</td></tr>";
 
             page += "<tr class=\"modesrow\" style=\"display:" +
-                    String(climate ? "" : "none") + "\"><td></td><td colspan=\"4\">";
+                    String(climate ? "" : "none") + "\"><td></td><td colspan=\"2\">";
             page += "<span class=\"modelabel\">MODES</span>";
             const char* codes[] = {"c", "h", "d", "f", "a"};
             const char* labels[] = {"COOL", "HEAT", "DRY", "FAN", "AUTO"};
@@ -459,7 +462,15 @@ static void handleRoot() {
                         "\"" + ((mask & bits[m]) ? " checked" : "") + "> " +
                         labels[m] + "</label>";
             }
-            page += "</td></tr>";
+            page += "<div class=\"auxfields\"><label>AUX entity";
+            page += "<input class=\"auxentity\" name=\"x" + String(index) +
+                    "\" list=\"entity-list\" value=\"" + htmlEscape(aux) +
+                    "\" placeholder=\"optional entity\"" + String(climate ? "" : " disabled") + ">";
+            page += "</label><label>AUX name";
+            page += "<input class=\"auxname\" name=\"y" + String(index) +
+                    "\" value=\"" + htmlEscape(auxName) +
+                    "\" placeholder=\"optional name\"" + String(climate ? "" : " disabled") + ">";
+            page += "</label></div></td></tr>";
         }
         page += "</tbody></table></div>";
     }
@@ -498,9 +509,13 @@ const MAX_PAGES = )JS") + String(MAX_PAGES) + R"JS(;
 const SLOTS = )JS" + String(GRID_SLOTS) + R"JS(;
 function updateModesRow(row) {
   const entity = row.querySelector('.entity').value.trim();
+  const climate = entity.toLowerCase().startsWith('climate.');
   const modesRow = row.nextElementSibling;
   if (modesRow && modesRow.classList.contains('modesrow')) {
-    modesRow.style.display = entity.startsWith('climate.') ? '' : 'none';
+    modesRow.style.display = climate ? '' : 'none';
+    modesRow.querySelectorAll('input').forEach(function(input) {
+      input.disabled = !climate;
+    });
   }
 }
 function bindRows() {
@@ -522,10 +537,10 @@ function renumberPages() {
       const idx = p * SLOTS + slot;
       row.querySelector('.entity').name = 'e' + idx;
       row.querySelector('.ename').name = 'n' + idx;
-      row.querySelector('.auxentity').name = 'x' + idx;
-      row.querySelector('.auxname').name = 'y' + idx;
       const modesRow = row.nextElementSibling;
       if (modesRow && modesRow.classList.contains('modesrow')) {
+        modesRow.querySelector('.auxentity').name = 'x' + idx;
+        modesRow.querySelector('.auxname').name = 'y' + idx;
         modesRow.querySelectorAll('input[type=checkbox]').forEach(function(cb) {
           cb.name = 'm' + idx + cb.dataset.code;
         });
@@ -543,23 +558,23 @@ function addPage() {
   for (let slot = 0; slot < SLOTS; slot++) {
     rows += '<tr class="slotrow"><td class="n">' + (slot + 1) + '</td>' +
       '<td><input class="entity" list="entity-list" placeholder="light.living_room"></td>' +
-      '<td><input class="ename" placeholder="optional name"></td>' +
-      '<td><input class="auxentity" list="entity-list" placeholder="optional entity"></td>' +
-      '<td><input class="auxname" placeholder="optional name"></td></tr>' +
-      '<tr class="modesrow" style="display:none"><td></td><td colspan="4">' +
+      '<td><input class="ename" placeholder="optional name"></td></tr>' +
+      '<tr class="modesrow" style="display:none"><td></td><td colspan="2">' +
       '<span class="modelabel">MODES</span>' +
       '<label class="inline"><input type="checkbox" data-code="c" checked> COOL</label>' +
       '<label class="inline"><input type="checkbox" data-code="h" checked> HEAT</label>' +
       '<label class="inline"><input type="checkbox" data-code="d" checked> DRY</label>' +
       '<label class="inline"><input type="checkbox" data-code="f"> FAN</label>' +
       '<label class="inline"><input type="checkbox" data-code="a"> AUTO</label>' +
+      '<div class="auxfields"><label>AUX entity<input class="auxentity" list="entity-list" placeholder="optional entity" disabled></label>' +
+      '<label>AUX name<input class="auxname" placeholder="optional name" disabled></label></div>' +
       '</td></tr>';
   }
   const block = document.createElement('div');
   block.className = 'pageblock';
   block.innerHTML = '<div class="pagehead"><span></span> <button type="button" class="remove" onclick="removePage(this)">Remove page</button></div>' +
     '<label>Title</label><input class="ptitle" value="PAGE' + (blocks.length + 1) + '">' +
-    '<table><tbody>' + rows + '</tbody></table>';
+    '<table><tbody><tr><th></th><th>Entity ID</th><th>Display name</th></tr>' + rows + '</tbody></table>';
   document.getElementById('pages').appendChild(block);
   renumberPages();
 }
@@ -920,6 +935,7 @@ static void startWebServer() {
             text += " core_charging=" + String(chargeStateName(power.coreCharging));
             text += " core_input=" + String(power.coreInput);
             text += " dock_charging=unknown dock_status_available=0";
+            text += " dock_inferred=" + String((int)power.dockInferred);
             text += " pmic_online=" + String((int)power.pmicOnline);
             text += " core_keep_on=" + String(power.coreKeepOn);
             text += " core_boost_enabled=" + String(power.coreBoostEnabled);

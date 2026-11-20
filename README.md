@@ -37,8 +37,8 @@ A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 - Menu starts at y = 24
 - Row height = 27 px, eight rows per page
 - Left index column: 24 px
-- Flipper theme: orange rows, cream index text, dark selected row with a cream
-  label and state; the selected index cell stays orange
+- Flipper theme: orange rows, dark index text; the selected row and index cell
+  use a medium brown background with cream text
 - Classic theme: dark blue selected row with green text
 - Row divider: 1 px solid line in Classic, dotted in Flipper
 - No bottom hint bar
@@ -91,8 +91,11 @@ animation readiness, brightness (0-255), duration, theme color, active state,
 trigger count, and the last sweep's frame count and visited-pixel mask
 (`1023` means all ten pixels).
 
-The on-screen battery icon remains. An unavailable battery reading shows `?`;
-it does not display an empty battery.
+The on-screen battery icon remains. On Core Basic, three consecutive unavailable
+PMIC samples show a plug over the battery: assumed dock/external power, with
+charging status unknown. A responding PMIC clears this hint immediately.
+This user-selected heuristic can also trigger on an I2C fault. Before it activates,
+an unavailable battery reading shows `?`, never an empty battery.
 
 The Bottom3 has its own TP4057 charger and a separate battery power switch.
 The Core's IP5306 readings do not directly report the TP4057 charging state.
@@ -127,7 +130,8 @@ power to wake it.
 
 Docked telemetry may still become unavailable even with boost keep-on enabled.
 In the device test, battery handoff continued working and live readings returned
-after undocking. `?` means no current battery reading; it does not mean empty.
+after undocking. A plug means assumed dock power, not confirmed charging/full;
+`?` means no current battery reading and does not mean empty.
 
 Web -> Display -> **Refresh battery status**, or `GET /power`, reports the
 battery percentage, battery voltage, USB-input voltage, and Core USB charger.
@@ -136,7 +140,7 @@ In particular, the Core Basic's IP5306 has no readable battery/VBUS voltage;
 a percentage reading is not converted into a made-up voltage.
 `/diag` uses `charging=unknown` when there is no confirmed charging/full signal;
 an inactive Core charger is not proof that the dock is not charging.
-It also reports `pmic_online`, `core_keep_on`, `core_boost_enabled`,
+It also reports `dock_inferred`, `pmic_online`, `core_keep_on`, `core_boost_enabled`,
 `core_charge_enabled`, `core_battery_handoff`, and `power_recoveries`.
 The Bottom3 TP4057's `CHRG` and `STDBY` pins are unconnected in the
 [manufacturer schematic](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1273/A168_Faces_Bottom3_Sche.pdf),
@@ -191,8 +195,8 @@ Fields:
 - Fallback brightness, 1-100%, default 30%
 - Day/night brightness and screen-off timeouts
 - Dynamic page blocks: title + eight slots
-- Each slot: entity ID, display name, optional AUX entity, optional AUX name
-- Climate slots: checkboxes for allowed MODE values (COOL/HEAT/DRY/FAN/AUTO)
+- Each slot: entity ID and display name
+- Climate slots only: optional AUX entity/name and allowed MODE values (COOL/HEAT/DRY/FAN/AUTO)
 - Hostname used for `http://<hostname>.local/` and OTA
 - Wi-Fi SSID and password
 - Home Assistant base URL
@@ -224,20 +228,22 @@ and empty pages are kept as configured.
 
 | Input | Action |
 | --- | --- |
-| A / C | move focus up / down |
-| A / C long press | previous / next page |
-| B | run the focused entity |
-| B long press | open detail view |
+| A / C | cursor up / down (wraps within the page, skips empty slots) |
+| B short press | toggle the focused entity / cycle AC mode; activate the focused AC detail control |
+| B long press | open AC detail from the menu / return to the menu from AC detail |
 | 1-8 | direct hotkey for the current page |
 | FACES keypad 1-8 | direct hotkey for the current page |
-| FACES keypad 0 / A | back |
-| FACES keypad = / Enter | run the focused entity or confirm |
-| A / C in non-AC detail | brightness or target temperature |
-| B in non-AC detail | back |
+| FACES keypad r1c1 (AC) | back to main menu; discards an unconfirmed temperature edit |
+| FACES keypad r1c2 (M) / r1c3 (%) | previous / next page (wraps at either end; main menu only) |
+| FACES keypad 0 | back / cancel temperature edit |
+| FACES keypad r5c4 (=), short or long press | open AC detail if available; otherwise toggle/run the focused entity; activate or confirm within AC detail |
+| Select an AC item | cycle OFF and its allowed, HA-supported modes |
+
+Only AC items have a detail panel. Sensors remain read-only in the main menu.
 
 ## AC detail
 
-Long press B on a `climate.*` row opens an eight-row detail menu:
+Long press B on a `climate.*` row opens a detail menu with eight numbered rows:
 
 ```
 1  MODE       COOL
@@ -247,24 +253,33 @@ Long press B on a `climate.*` row opens an eight-row detail menu:
 5  ACTION     COOLING
 6  <AUX name> ON
 7  CURRENT    27.5C
-8  BACK
+8
 ```
 
 - MODE cycles OFF plus the allowed, HA-supported modes configured in the web UI
-- TEMP enters edit mode: A/C change by `target_temp_step`, B confirms, long B cancels
+- TEMP enters edit mode: A/C change by `target_temp_step`, B confirms; long B discards the edit and returns to the menu
 - FAN and SWING cycle the HA `fan_modes` / `swing_modes`
 - ACTION and CURRENT are read-only
-- AUX is any configured entity: switches/lights toggle, scenes run, sensors are read-only
+- Only climate items can have an AUX entity; switches/lights toggle, scenes run, sensors are read-only
 - The AUX row uses the configured AUX display name
-- Rows use uppercase text; only the affected row redraws
+- Rows use uppercase text; value updates redraw only the changed text area
 - The status bar shows the AC display name and hides page squares
 - Missing values show `--`
+- Row 8 stays visible with its number, but has no label or action and is skipped by cursor navigation
+- Keypad r1c1 (AC) returns to the main menu with a short or long press; there is no Back row
+
+The [official Calculator3 protocol](https://docs.m5stack.com/en/protocol/A005-V3/I2C)
+defines r1c1 as ASCII `A` on a short press and backspace on a long press.
+Key data is read directly from I2C address `0x08`, without a register address.
 
 Serial developer keys: `1-8`, `w`/`s` focus, `p`/`n` page, `e`/Enter action,
-`0` back, `M` detail, `+`/`-` adjust.
+`0` back, `M`/`%` previous/next page, `.` AC detail, `+`/`-` adjust.
 
-Only the changed row, detail content, or status bar is redrawn. The full screen
-is painted once at boot.
+Value refreshes in the menu and AC panel redraw only changed text bounds;
+unchanged values are skipped. Shorter values clear their previous width so no
+old characters remain. Labels redraw only when their text, color, or truncation
+changes. Selection, edit highlighting, and page changes redraw the affected rows.
+The full screen is painted once at boot.
 
 ## Home Assistant API
 

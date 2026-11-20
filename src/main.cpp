@@ -44,6 +44,7 @@ static constexpr uint16_t C_ORANGE   = TFT_ORANGE;
 static constexpr uint16_t F_BAR     = 0x28A1;
 static constexpr uint16_t F_ORANGE  = 0xE4C7;
 static constexpr uint16_t F_CREAM   = 0xF739;
+static constexpr uint16_t F_SELECTED = 0x82E6;
 static constexpr uint16_t F_DARK    = 0x1860;
 static constexpr uint16_t F_LINE    = 0x8A62;
 static constexpr uint16_t F_DIM     = 0x6A28;
@@ -84,9 +85,9 @@ static void applyTheme() {
     } else {
         g_theme = {
             F_CREAM, F_BAR, F_CREAM, F_CREAM, F_LINE,
-            F_ORANGE, F_DARK, F_DARK, F_CREAM,
+            F_ORANGE, F_SELECTED, F_DARK, F_CREAM,
             F_ORANGE, F_DARK, F_ORANGE, F_DARK,
-            F_ORANGE, F_DARK, F_LINE, F_LINE,
+            F_SELECTED, F_CREAM, F_LINE, F_LINE,
             F_ORANGE, F_LINE, F_DARK, F_DIM, F_DIM,
             F_DARK, F_DARK, F_DARK, F_DARK,
             F_DARK, F_DARK, F_DARK,
@@ -125,6 +126,7 @@ static bool g_statusLinkDirty = false;
 static bool g_statusBatteryDirty = false;
 static int g_lastBatteryPct = -1;
 static bool g_lastCharging = false;
+static bool g_lastDockInferred = false;
 static wl_status_t g_lastWifiStatus = WL_IDLE_STATUS;
 static bool g_dirty[MAX_ENTITIES] = {false};
 
@@ -156,6 +158,7 @@ static wl_status_t g_prevWifiLink = WL_IDLE_STATUS;
 static bool g_cmdMode = false;
 static String g_cmdLine;
 
+static constexpr int AC_ROWS = 7;
 static int g_acCursor = 0;
 static bool g_acEditing = false;
 static float g_acDraftTemp = NAN;
@@ -172,12 +175,9 @@ static void keypadInit() {
 }
 
 static uint8_t keypadReadByte() {
-    // New Calculator3 uses register 0x00; older MEGA328 panels answer a
-    // plain request. Try both so either panel works.
+    // Both Calculator3 and the older MEGA328 panel return key data directly.
+    // A register read would consume Calculator3's pending key interrupt.
     uint8_t value = 0;
-    if (M5.In_I2C.readRegister(0x08, 0x00, &value, 1, 100000) && value != 0) {
-        return value;
-    }
     if (!M5.In_I2C.start(0x08, true, 100000)) return 0;
     bool readOk = M5.In_I2C.read(&value, 1, true);
     bool stopOk = M5.In_I2C.stop();
@@ -194,7 +194,7 @@ static char keypadPoll() {
 
     char c = 0;
     if (raw >= '0' && raw <= '9') c = (char)raw;
-    else if (raw == 'A' || raw == '=') c = (char)raw;
+    else if (raw == 'A' || raw == '\b' || raw == 'M' || raw == '%' || raw == '=') c = (char)raw;
     else if (raw == 0x0D) c = '\r';
     if (c == 0) return 0;
 
@@ -631,28 +631,25 @@ static uint16_t entityStateColor(const EntityState& e) {
     }
 }
 
-static const char* typeLabel(EntityType type) {
-    switch (type) {
-        case EntityType::Light:   return "LIGHT";
-        case EntityType::Switch:  return "SWITCH";
-        case EntityType::Climate: return "CLIMATE";
-        case EntityType::Scene:   return "SCENE";
-        case EntityType::Media:   return "MEDIA";
-        case EntityType::Sensor:  return "SENSOR";
-        case EntityType::Cover:   return "COVER";
-        default:                  return "ENTITY";
-    }
-}
-
 // ---------------------------------------------------------------------
 //  Status bar
 // ---------------------------------------------------------------------
-static void drawBattery(LovyanGFX& g, int x, int y, int pct, bool charging) {
+static void drawBattery(LovyanGFX& g, int x, int y, int pct, bool charging,
+                        bool dockInferred) {
     // Monochrome battery icon, same color as the signal bars.
     const uint16_t mono = g_theme.barText;
     g.drawRect(x, y, 18, 12, mono);
     g.drawRect(x - 1, y - 1, 20, 14, mono);
     g.fillRect(x + 20, y + 4, 2, 5, mono);
+
+    if (dockInferred) {
+        // Plug overlay means assumed dock power, with no charging/full claim.
+        g.fillRect(x + 6, y + 2, 2, 3, mono);
+        g.fillRect(x + 10, y + 2, 2, 3, mono);
+        g.fillRect(x + 5, y + 5, 8, 4, mono);
+        g.fillRect(x + 8, y + 9, 2, 2, mono);
+        return;
+    }
 
     if (charging) {
         g.fillTriangle(x + 10, y + 2, x + 6, y + 6, x + 9, y + 6, mono);
@@ -735,7 +732,8 @@ static void drawStatusBar(LovyanGFX& g) {
     drawStatusCenter(g);
     drawLinkIcon(g, 270, 5);
     PowerStatus power = readPowerStatus();
-    drawBattery(g, 294, 6, power.batteryPercent, power.charging == ChargeState::Charging);
+    drawBattery(g, 294, 6, power.batteryPercent,
+                power.charging == ChargeState::Charging, power.dockInferred);
 }
 
 // ---------------------------------------------------------------------
@@ -751,40 +749,82 @@ static void drawThemeDivider(LovyanGFX& g, int y) {
     }
 }
 
-static void drawMenuRow(LovyanGFX& g, int slot, const EntityState& e, bool selected) {
+// Cache only the physical display. Screenshot rendering must not change what
+// we believe is currently on screen.
+struct RowPaint {
+    String label, value;
+    int labelWidth = 0, valueLeft = 314;
+    uint16_t bg = 0, labelColor = 0, valueColor = 0;
+    uint16_t numberBg = 0, numberColor = 0;
+    bool valid = false;
+};
+static RowPaint g_rowPaint[GRID_SLOTS];
+
+static void paintListRow(LovyanGFX& g, int slot, const RowPaint& row,
+                         bool forceFull) {
+    RowPaint& previous = g_rowPaint[slot];
+    bool display = (&g == &M5.Display);
+    bool full = forceFull || !display || !previous.valid ||
+                previous.bg != row.bg || previous.numberBg != row.numberBg ||
+                previous.numberColor != row.numberColor;
     int y = MENU_Y + slot * MENU_ROW_H;
+    bool labelChanged = full || previous.label != row.label ||
+                        previous.labelColor != row.labelColor;
+    bool valueChanged = full || previous.value != row.value ||
+                        previous.valueColor != row.valueColor;
+    if (full) {
+        g.fillRect(0, y, SCR_W, MENU_ROW_H, row.bg);
+        g.fillRect(0, y, 24, MENU_ROW_H, row.numberBg);
+        if (g_theme.numberLine != 0) {
+            g.drawFastVLine(24, y, MENU_ROW_H, g_theme.numberLine);
+        }
+        char number[2] = { char('1' + slot), 0 };
+        txt(g, number, 6, y + 5, row.numberColor, 2);
+        if (slot < GRID_SLOTS - 1) drawThemeDivider(g, y + MENU_ROW_H - 1);
+    } else {
+        g.setTextSize(2);
+        // Clear both old and new bounds before drawing either field. A value
+        // growing wider can also shorten a long label beside it.
+        if (labelChanged) {
+            int width = max(previous.labelWidth, row.labelWidth);
+            if (width > 0) g.fillRect(32, y + 5, width, g.fontHeight(), row.bg);
+        }
+        if (valueChanged) {
+            int left = min(previous.valueLeft, row.valueLeft);
+            if (left < 314) g.fillRect(left, y + 5, 315 - left, g.fontHeight(), row.bg);
+        }
+    }
+    if (labelChanged && !row.label.isEmpty()) {
+        txt(g, row.label.c_str(), 32, y + 5, row.labelColor, 2);
+    }
+    if (valueChanged && !row.value.isEmpty()) {
+        txtR(g, row.value.c_str(), 314, y + 5, row.valueColor, 2);
+    }
+    if (display) {
+        previous = row;
+        previous.valid = true;
+    }
+}
+
+static void drawMenuRow(LovyanGFX& g, int slot, const EntityState& e,
+                        bool selected, bool forceFull = true) {
     bool empty = e.id.isEmpty();
-
-    g.fillRect(0, y, SCR_W, MENU_ROW_H, selected ? g_theme.rowSel : g_theme.rowBg);
-
-    uint16_t numberBg = selected ? g_theme.numSelBg
-                                 : (empty ? g_theme.numBgEmpty : g_theme.numBg);
-    uint16_t numberFg = selected ? g_theme.numSelText
-                                 : (empty ? g_theme.numTextEmpty : g_theme.numText);
-    g.fillRect(0, y, 24, MENU_ROW_H, numberBg);
-    if (g_theme.numberLine != 0) {
-        g.drawFastVLine(24, y, MENU_ROW_H, g_theme.numberLine);
+    RowPaint row;
+    row.bg = selected ? g_theme.rowSel : g_theme.rowBg;
+    row.numberBg = selected ? g_theme.numSelBg
+                            : (empty ? g_theme.numBgEmpty : g_theme.numBg);
+    row.numberColor = selected ? g_theme.numSelText
+                               : (empty ? g_theme.numTextEmpty : g_theme.numText);
+    row.labelColor = selected ? g_theme.rowSelText : g_theme.rowText;
+    row.valueColor = selected ? g_theme.rowSelText : entityStateColor(e);
+    if (!empty) {
+        row.value = fitText(g, entityStateText(e), 140, 2);
+        row.valueLeft = 314 - (int)g.textWidth(row.value.c_str());
+        int nameWidth = max(90, row.valueLeft - 32 - 8);
+        row.label = fitText(g, displayName(e), nameWidth, 2);
+        row.labelWidth = g.textWidth(row.label.c_str());
     }
-
-    char number[2] = { char('1' + slot), 0 };
-    txt(g, number, 6, y + 5, numberFg, 2);
-
-    if (slot < GRID_SLOTS - 1) {
-        drawThemeDivider(g, y + MENU_ROW_H - 1);
-    }
-
-    // Unconfigured slots keep their numbered row but have no label.
-    if (empty) return;
-
-    String state = fitText(g, entityStateText(e), 140, 2);
-    int nameWidth = 314 - 32 - 8 - (int)g.textWidth(state.c_str());
-    if (nameWidth < 90) nameWidth = 90;
-    String name = fitText(g, displayName(e), nameWidth, 2);
-
-    txt(g, name.c_str(), 32, y + 5,
-        selected ? g_theme.rowSelText : g_theme.rowText, 2);
-    txtR(g, state.c_str(), 314, y + 5,
-         selected ? g_theme.rowSelText : entityStateColor(e), 2);
+    paintListRow(g, slot, row, forceFull);
 }
 
 static void drawMenu(LovyanGFX& g) {
@@ -794,7 +834,7 @@ static void drawMenu(LovyanGFX& g) {
 }
 
 // ---------------------------------------------------------------------
-//  Detail view
+//  AC detail view
 // ---------------------------------------------------------------------
 static bool acDetailActive() {
     return g_detail && g_detailGlobal >= 0 &&
@@ -935,39 +975,25 @@ static String acCurrentText(const EntityState& e) {
 }
 
 static void drawAcRow(LovyanGFX& g, int slot, const String& label,
-                      const String& value, bool selected, bool editing) {
-    int y = MENU_Y + slot * MENU_ROW_H;
-    uint16_t bg = editing ? g_theme.editBg
-                          : (selected ? g_theme.rowSel : g_theme.rowBg);
-    g.fillRect(0, y, SCR_W, MENU_ROW_H, bg);
-
-    uint16_t numberBg = editing ? g_theme.editBg
-                                : (selected ? g_theme.numSelBg : g_theme.numBg);
-    uint16_t numberFg = editing ? g_theme.editText
-                                : (selected ? g_theme.numSelText : g_theme.numText);
-    g.fillRect(0, y, 24, MENU_ROW_H, numberBg);
-    if (g_theme.numberLine != 0) {
-        g.drawFastVLine(24, y, MENU_ROW_H, g_theme.numberLine);
-    }
-
-    char number[2] = { char('1' + slot), 0 };
-    txt(g, number, 6, y + 5, numberFg, 2);
-
-    if (slot < GRID_SLOTS - 1) {
-        drawThemeDivider(g, y + MENU_ROW_H - 1);
-    }
-
-    uint16_t labelColor = editing ? g_theme.editText
-                                  : (selected ? g_theme.rowSelText : g_theme.rowText);
-    uint16_t valueColor = editing ? g_theme.editText
-                                  : (selected ? g_theme.rowSelText : g_theme.text);
-    String labelText = fitText(g, label, 128, 2);
-    int valueWidth = 314 - 32 - 8 - (int)g.textWidth(labelText.c_str());
-    if (valueWidth < 80) valueWidth = 80;
-    String valueText = fitText(g, value, valueWidth, 2);
-
-    txt(g, labelText.c_str(), 32, y + 5, labelColor, 2);
-    txtR(g, valueText.c_str(), 314, y + 5, valueColor, 2);
+                      const String& value, bool selected, bool editing,
+                      bool forceFull = false) {
+    RowPaint row;
+    row.bg = editing ? g_theme.editBg
+                     : (selected ? g_theme.rowSel : g_theme.rowBg);
+    row.numberBg = editing ? g_theme.editBg
+                           : (selected ? g_theme.numSelBg : g_theme.numBg);
+    row.numberColor = editing ? g_theme.editText
+                              : (selected ? g_theme.numSelText : g_theme.numText);
+    row.labelColor = editing ? g_theme.editText
+                             : (selected ? g_theme.rowSelText : g_theme.rowText);
+    row.valueColor = editing ? g_theme.editText
+                             : (selected ? g_theme.rowSelText : g_theme.text);
+    row.label = fitText(g, label, 128, 2);
+    row.labelWidth = g.textWidth(row.label.c_str());
+    int valueWidth = max(80, 314 - 32 - 8 - row.labelWidth);
+    row.value = fitText(g, value, valueWidth, 2);
+    row.valueLeft = 314 - (int)g.textWidth(row.value.c_str());
+    paintListRow(g, slot, row, forceFull);
 }
 
 static String acLabelFor(const EntityState& e, int index, int slot) {
@@ -979,7 +1005,7 @@ static String acLabelFor(const EntityState& e, int index, int slot) {
         case 4: return "ACTION";
         case 5: return acAuxLabel(e, index);
         case 6: return "CURRENT";
-        default: return "BACK";
+        default: return "";
     }
 }
 
@@ -996,114 +1022,13 @@ static String acValueFor(const EntityState& e, int slot) {
     }
 }
 
-static void drawAcDetail(LovyanGFX& g, const EntityState& e) {
-    for (int i = 0; i < 8; i++) {
+static void drawAcDetail(LovyanGFX& g, const EntityState& e, bool forceFull = true) {
+    // Keep all eight numbered rows visible; only the first seven have controls.
+    for (int i = 0; i < GRID_SLOTS; i++) {
         drawAcRow(g, i, acLabelFor(e, g_detailGlobal, i),
                   acValueFor(e, i), i == g_acCursor,
-                  i == 1 && g_acEditing);
+                  i == 1 && g_acEditing, forceFull);
     }
-}
-
-static String detailValue(const EntityState& e) {
-    if (!e.available) return String("--");
-    switch (e.type) {
-        case EntityType::Light: {
-            if (!e.on) return String("OFF");
-            int pct = lightPercent(e);
-            return pct >= 0 ? String(pct) + "%" : String("ON");
-        }
-        case EntityType::Climate: {
-            float t = validTemp(e.current) ? e.current
-                                          : (validTemp(e.target) ? e.target : NAN);
-            return validTemp(t) ? tempText(t) : upperText(e.state);
-        }
-        case EntityType::Sensor: {
-            String s = e.state;
-            if (!e.unit.isEmpty()) s += " " + e.unit;
-            return shorten(s, 8);
-        }
-        case EntityType::Media:
-            return shorten(upperText(e.state), 7);
-        case EntityType::Scene:
-            return String("SCENE");
-        case EntityType::Switch:
-            return e.on ? String("ON") : String("OFF");
-        case EntityType::Cover:
-            return shorten(upperText(e.state), 7);
-        default:
-            return String("--");
-    }
-}
-
-static String detailCaption(const EntityState& e) {
-    switch (e.type) {
-        case EntityType::Light:   return String("BRIGHTNESS");
-        case EntityType::Climate: return String("CURRENT");
-        case EntityType::Sensor:  return String("CURRENT");
-        case EntityType::Media:   return shorten(e.detail.isEmpty() ? String("MEDIA") : e.detail, 24);
-        case EntityType::Scene:   return String("SCENE");
-        case EntityType::Switch:  return String("SWITCH");
-        case EntityType::Cover:   return String("COVER");
-        default:                  return String("VALUE");
-    }
-}
-
-static void drawDetailHeader(LovyanGFX& g, const EntityState& e) {
-    txt(g, typeLabel(e.type), 12, 31, g_theme.dim, 1);
-
-    String name = fitText(g, displayName(e), 200, 2);
-    txt(g, name.c_str(), 12, 42, g_theme.text, 2);
-    txtR(g, shorten(entityStateText(e), 14).c_str(), 308, 44,
-         entityStateColor(e), 1);
-}
-
-static void drawDetailPanel(LovyanGFX& g, const EntityState& e) {
-    g.fillRect(8, 62, 304, 120, g_theme.cardBg);
-    g.drawRect(8, 62, 304, 120, g_theme.cardLine);
-    g.fillRect(8, 62, 4, 120, e.available ? typeAccent(e.type) : g_theme.off);
-
-    g.fillRect(22, 80, 48, 48, g_theme.iconWell);
-    iconFor(g, 32, 90, e);
-
-    String value = fitText(g, detailValue(e), 200, 3);
-    txt(g, value.c_str(), 88, 72, g_theme.text, 3);
-    txt(g, detailCaption(e).c_str(), 88, 102, g_theme.dim, 1);
-
-    int barPct = -1;
-    if (e.type == EntityType::Light) {
-        barPct = e.on ? constrain(lightPercent(e), 0, 100) : 0;
-    } else if (e.type == EntityType::Climate) {
-        float t = validTemp(e.target) ? e.target : 22.0f;
-        barPct = (int)(((t - 5.0f) * 100.0f) / 30.0f);
-    }
-    if (barPct >= 0) {
-        barPct = constrain(barPct, 0, 100);
-        g.fillRect(88, 118, 200, 10, g_theme.barTrack);
-        if (barPct > 0) g.fillRect(88, 118, 2 * barPct, 10, typeAccent(e.type));
-        g.drawRect(88, 118, 200, 10, g_theme.cardLine);
-    }
-
-    g.drawFastHLine(22, 140, 276, g_theme.cardLine);
-
-    String bottomLeft = shorten(e.id, 21);
-    String bottomRight;
-    if (e.type == EntityType::Climate) {
-        float t = validTemp(e.target) ? e.target : NAN;
-        bottomRight = validTemp(t) ? ("TARGET " + tempText(t)) : String("TARGET --");
-    } else if (e.type == EntityType::Media) {
-        bottomRight = shorten(e.detail, 10);
-    } else if (e.type == EntityType::Light) {
-        bottomRight = e.on ? String("STATE ON") : String("STATE OFF");
-    } else if (e.type == EntityType::Sensor) {
-        bottomRight = shorten(e.detail, 10);
-    }
-    txt(g, bottomLeft.c_str(), 22, 150, g_theme.dim, 1);
-    txtR(g, bottomRight.c_str(), 304, 150, g_theme.dim, 1);
-}
-
-static void drawDetail(LovyanGFX& g, const EntityState& e) {
-    drawDetailHeader(g, e);
-    drawDetailPanel(g, e);
 }
 
 // ---------------------------------------------------------------------
@@ -1113,9 +1038,8 @@ static void renderAll(LovyanGFX& g) {
     g.fillScreen(g_theme.bg);
     drawStatusBar(g);
 
-    if (g_detail && g_detailGlobal >= 0) {
-        if (acDetailActive()) drawAcDetail(g, g_cards[g_detailGlobal]);
-        else drawDetail(g, g_cards[g_detailGlobal]);
+    if (acDetailActive()) {
+        drawAcDetail(g, acEntity());
     } else {
         drawMenu(g);
     }
@@ -1131,9 +1055,8 @@ static void renderInitial() {
 static void redrawContent() {
     M5.Display.startWrite();
     M5.Display.fillRect(0, SB_H, SCR_W, SCR_H - SB_H, g_theme.bg);
-    if (g_detail && g_detailGlobal >= 0) {
-        if (acDetailActive()) drawAcDetail(M5.Display, g_cards[g_detailGlobal]);
-        else drawDetail(M5.Display, g_cards[g_detailGlobal]);
+    if (acDetailActive()) {
+        drawAcDetail(M5.Display, acEntity());
     } else {
         drawMenu(M5.Display);
     }
@@ -1148,29 +1071,15 @@ static void redrawMenuPage() {
     M5.Display.endWrite();
 }
 
-static void redrawDetail() {
-    if (g_detailGlobal < 0 || g_detailGlobal >= g_config.entityCount) return;
-    M5.Display.startWrite();
-    M5.Display.fillRect(0, SB_H, SCR_W, 39, g_theme.bg);
-    drawDetailHeader(M5.Display, g_cards[g_detailGlobal]);
-    drawDetailPanel(M5.Display, g_cards[g_detailGlobal]);
-    M5.Display.endWrite();
-}
-
 static void redrawAcDetail() {
     if (!acDetailActive()) return;
-    EntityState& e = acEntity();
     M5.Display.startWrite();
-    for (int i = 0; i < 8; i++) {
-        drawAcRow(M5.Display, i, acLabelFor(e, g_detailGlobal, i),
-                  acValueFor(e, i), i == g_acCursor,
-                  i == 1 && g_acEditing);
-    }
+    drawAcDetail(M5.Display, acEntity(), false);
     M5.Display.endWrite();
 }
 
 static void redrawAcRow(int slot) {
-    if (!acDetailActive()) return;
+    if (!acDetailActive() || slot < 0 || slot >= AC_ROWS) return;
     EntityState& e = acEntity();
     M5.Display.startWrite();
     drawAcRow(M5.Display, slot, acLabelFor(e, g_detailGlobal, slot),
@@ -1181,7 +1090,7 @@ static void redrawAcRow(int slot) {
 
 static void redrawRow(int slot, bool selected) {
     M5.Display.startWrite();
-    drawMenuRow(M5.Display, slot, cardAt(slot), selected);
+    drawMenuRow(M5.Display, slot, cardAt(slot), selected, false);
     M5.Display.endWrite();
 }
 
@@ -1208,7 +1117,7 @@ static void redrawStatusRegions() {
         M5.Display.fillRect(290, 0, 30, SB_H, g_theme.barBg);
         PowerStatus power = readPowerStatus();
         drawBattery(M5.Display, 294, 6, power.batteryPercent,
-                    power.charging == ChargeState::Charging);
+                    power.charging == ChargeState::Charging, power.dockInferred);
     }
     M5.Display.endWrite();
 
@@ -1223,8 +1132,7 @@ static void renderDirty() {
         bool detailDirty = (g_detailGlobal >= 0 && g_dirty[g_detailGlobal]);
         for (int i = 0; i < MAX_ENTITIES; i++) g_dirty[i] = false;
         if (detailDirty) {
-            if (acDetailActive()) redrawAcDetail();
-            else redrawDetail();
+            redrawAcDetail();
         }
         redrawStatusRegions();
         return;
@@ -1236,7 +1144,7 @@ static void renderDirty() {
         if (index >= g_config.entityCount) continue;
         if (!g_dirty[index]) continue;
         g_dirty[index] = false;
-        drawMenuRow(M5.Display, slot, g_cards[index], slot == g_focus);
+        drawMenuRow(M5.Display, slot, g_cards[index], slot == g_focus, false);
     }
     M5.Display.endWrite();
 
@@ -1322,7 +1230,8 @@ static void goBack() {
 
 static void openDetail() {
     if (g_detail) return;
-    if (cardAt(g_focus).id.isEmpty()) return;
+    const EntityState& e = cardAt(g_focus);
+    if (e.id.isEmpty() || e.type != EntityType::Climate) return;
     g_detail = true;
     g_detailGlobal = globalSlot(g_focus);
     g_acCursor = 0;
@@ -1377,8 +1286,8 @@ static void acMove(int delta) {
     if (!acDetailActive()) return;
     EntityState& e = acEntity();
     int next = g_acCursor;
-    for (int step = 0; step < 8; step++) {
-        next = (next + delta + 8) % 8;
+    for (int step = 0; step < AC_ROWS; step++) {
+        next = (next + delta + AC_ROWS) % AC_ROWS;
         if (next == g_acCursor) return;
         if (next == 5 && e.aux.id.isEmpty()) continue;
         int old = g_acCursor;
@@ -1401,21 +1310,18 @@ static void acAdjust(int delta) {
     sfxArrow();
 }
 
-static void acNextMode() {
-    EntityState& e = acEntity();
-    String list = acModeCycle(e, g_detailGlobal);
+static bool acNextMode(EntityState& e, int index) {
+    String list = acModeCycle(e, index);
     String next = nextCsv(list, e.state);
-    if (next.isEmpty() || next.equalsIgnoreCase(e.state)) return;
+    if (next.isEmpty() || next.equalsIgnoreCase(e.state)) return false;
     bool ok = callService("climate", "set_hvac_mode", e.id,
                           "\"hvac_mode\":\"" + next + "\"");
     if (ok) {
         e.state = next;
         e.on = (next != "off");
         e.available = true;
-        redrawAcDetail();
-        scheduleRefresh();
-        sfxSelect();
     }
+    return ok;
 }
 
 static void acCycleFan() {
@@ -1520,21 +1426,25 @@ static void acAction() {
         return;
     }
     switch (g_acCursor) {
-        case 0: acNextMode(); break;
+        case 0:
+            if (acNextMode(acEntity(), g_detailGlobal)) {
+                redrawAcDetail();
+                scheduleRefresh();
+                sfxSelect();
+            }
+            break;
         case 1: acTempAction(); break;
         case 2: acCycleFan(); break;
         case 3: acCycleSwing(); break;
         case 4: break;
         case 5: acAuxAction(); break;
         case 6: break;
-        case 7: goBack(); break;
     }
 }
 
 static void primaryAction() {
     if (g_detail) {
-        if (acDetailActive()) acAction();
-        else goBack();
+        acAction();
         return;
     }
 
@@ -1571,18 +1481,16 @@ static void primaryAction() {
             ok = callService(domain, "toggle", e.id);
             break;
         case EntityType::Climate:
+            ok = acNextMode(e, globalSlot(g_focus));
+            if (ok) sfxSelect();
+            break;
         case EntityType::Sensor:
         default:
-            openDetail();
             return;
     }
 
     if (ok) scheduleRefresh();
-    if (g_detail) {
-        redrawDetail();
-    } else {
-        redrawRow(g_focus, true);
-    }
+    redrawRow(g_focus, true);
     redrawStatusRegions();
 }
 
@@ -1617,7 +1525,7 @@ static void adjustSelected(int delta) {
         return;
     }
     if (g_detail) {
-        redrawDetail();
+        redrawAcDetail();
     } else {
         redrawRow(g_focus, true);
     }
@@ -1658,6 +1566,18 @@ static void directSelect(int idx) {
 static void handleKey(char c) {
     noteActivity();
 
+    // Keypad r1c1 (AC): short press sends 'A', long press sends backspace.
+    // Always leave the panel, discarding any unconfirmed temperature edit.
+    if (c == 'A' || c == '\b') {
+        goBack();
+        return;
+    }
+    // Keypad r1c2 / r1c3: previous / next page.
+    if (c == 'M' || c == '%') {
+        changePage(c == 'M' ? -1 : +1);
+        return;
+    }
+
     if (acDetailActive()) {
         switch (c) {
             case 'w': case 'a': acMove(-1); break;
@@ -1665,7 +1585,7 @@ static void handleKey(char c) {
             case 'e': case '=': case '\r': acAction(); break;
             case '+': acAdjust(+1); break;
             case '-': acAdjust(-1); break;
-            case '0': case 'b': case 'A':
+            case '0': case 'b':
                 if (g_acEditing) {
                     g_acEditing = false;
                     redrawAcRow(1);
@@ -1674,7 +1594,7 @@ static void handleKey(char c) {
                 }
                 break;
             default:
-                if (c >= '1' && c <= '8') {
+                if (c >= '1' && c < '1' + AC_ROWS) {
                     int slot = c - '1';
                     if (slot == 5 && acEntity().aux.id.isEmpty()) break;
                     int old = g_acCursor;
@@ -1693,9 +1613,13 @@ static void handleKey(char c) {
         case 'w': case 'a': moveFocus(-1); break;
         case 's': case 'd': moveFocus(+1); break;
 
-        case 'e': case '=': case '\r': primaryAction(); break;
-        case '0': case 'b': case 'A': goBack(); break;
-        case 'M': case '.': openDetail(); break;
+        case 'e': primaryAction(); break;
+        case '=': case '\r':
+            if (cardAt(g_focus).type == EntityType::Climate) openDetail();
+            else primaryAction();
+            break;
+        case '0': case 'b': goBack(); break;
+        case '.': openDetail(); break;
         case 'p': changePage(-1); break;
         case 'n': changePage(+1); break;
         case '+': adjustSelected(+1); break;
@@ -1711,17 +1635,11 @@ static void handleButtons() {
     static bool aHeld = false, cHeld = false, bHeld = false;
 
     if (M5.BtnA.wasPressed()) aHeld = true;
-    if (aHeld && M5.BtnA.pressedFor(600)) {
-        if (!g_detail) changePage(-1);
-        aHeld = false;
-    }
     if (M5.BtnA.wasReleased()) {
         if (aHeld) {
             if (acDetailActive()) {
                 if (g_acEditing) acAdjust(-1);
                 else acMove(-1);
-            } else if (g_detail) {
-                adjustSelected(-1);
             } else {
                 moveFocus(-1);
             }
@@ -1730,17 +1648,11 @@ static void handleButtons() {
     }
 
     if (M5.BtnC.wasPressed()) cHeld = true;
-    if (cHeld && M5.BtnC.pressedFor(600)) {
-        if (!g_detail) changePage(+1);
-        cHeld = false;
-    }
     if (M5.BtnC.wasReleased()) {
         if (cHeld) {
             if (acDetailActive()) {
                 if (g_acEditing) acAdjust(+1);
                 else acMove(+1);
-            } else if (g_detail) {
-                adjustSelected(+1);
             } else {
                 moveFocus(+1);
             }
@@ -1751,12 +1663,7 @@ static void handleButtons() {
     if (M5.BtnB.wasPressed()) bHeld = true;
     if (bHeld && M5.BtnB.pressedFor(600)) {
         if (g_detail) {
-            if (acDetailActive() && g_acEditing) {
-                g_acEditing = false;
-                redrawAcRow(1);
-            } else {
-                goBack();
-            }
+            goBack();
         } else {
             openDetail();
         }
@@ -1934,6 +1841,7 @@ void setup() {
     PowerStatus power = readPowerStatus();
     g_lastBatteryPct = power.batteryPercent;
     g_lastCharging = power.charging == ChargeState::Charging;
+    g_lastDockInferred = power.dockInferred;
     g_lastWifiStatus = WiFi.status();
 
     uint8_t brightness = constrain(g_config.brightness, (uint8_t)1, (uint8_t)100);
@@ -1951,7 +1859,9 @@ void setup() {
                                   ? defaultNameFromId(g_cards[i].id)
                                   : g_cards[i].customName;
             g_cards[i].state = "--";
-            g_cards[i].aux.id = g_config.auxEntities[i];
+            if (g_cards[i].type == EntityType::Climate) {
+                g_cards[i].aux.id = g_config.auxEntities[i];
+            }
             if (!g_cards[i].aux.id.isEmpty()) {
                 g_cards[i].aux.type = entityTypeFromId(g_cards[i].aux.id);
                 g_cards[i].aux.name = defaultNameFromId(g_cards[i].aux.id);
@@ -2049,15 +1959,17 @@ void loop() {
     refreshTick();
 
     static uint32_t lastBar = 0;
-    if (millis() - lastBar > 5000) {
+    if (millis() - lastBar > 500) {
         lastBar = millis();
 
         PowerStatus power = readPowerStatus();
         int pct = power.batteryPercent;
         bool charging = power.charging == ChargeState::Charging;
-        if (pct != g_lastBatteryPct || charging != g_lastCharging) {
+        if (pct != g_lastBatteryPct || charging != g_lastCharging ||
+            power.dockInferred != g_lastDockInferred) {
             g_lastBatteryPct = pct;
             g_lastCharging = charging;
+            g_lastDockInferred = power.dockInferred;
             g_statusBatteryDirty = true;
         }
 

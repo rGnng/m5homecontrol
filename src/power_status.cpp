@@ -69,6 +69,12 @@ PowerStatus readPowerStatus() {
                 status.coreBatteryHandoff = (handoff & 0x04) ? 1 : 0;
             }
         }
+        // User-selected dock heuristic: do not treat one failed I2C sample as
+        // docking. This is an external-power hint, not charger telemetry.
+        static uint8_t unavailableSamples = 0;
+        if (status.pmicOnline) unavailableSamples = 0;
+        else if (unavailableSamples < 3) ++unavailableSamples;
+        status.dockInferred = unavailableSamples >= 3;
     } else {
         status = PowerStatus();
         status.batteryPercent = M5.Power.getBatteryLevel();
