@@ -3,6 +3,8 @@
 A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 
 - M5Code-style menu: eight rows per page
+- Two themes: `Flipper` (default) and `Classic`
+- Bold proportional font for menu rows, states, and detail values
 - Numbered index column, entity name, live state on the right
 - Dynamic number of pages, eight entities per page
 - Configurable page titles, default `PAGE1`, `PAGE2`, ...
@@ -34,10 +36,11 @@ A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 
 - Menu starts at y = 24
 - Row height = 27 px, eight rows per page
-- Left index column: 24 px, dark for configured entities, teal for empty rows,
-  green when selected
-- Selected row: navy background, green text
-- 1 px dark grey divider between rows, including the index column
+- Left index column: 24 px
+- Flipper theme: orange rows, cream index text, dark selected row with a cream
+  label and state; the selected index cell stays orange
+- Classic theme: dark blue selected row with green text
+- Row divider: 1 px solid line in Classic, dotted in Flipper
 - No bottom hint bar
 - Entity state is right-aligned at x = 314
 - Custom display name overrides the Home Assistant friendly name; empty uses the
@@ -48,12 +51,13 @@ A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 ## Status bar
 
 - Left: current page title
-- Center: page squares, active page white
+- Center: page squares, active page highlighted
 - Right: combined Wi-Fi / HA link icon, then the battery icon
-- Wi-Fi is not configured: grey signal icon, blinking
-- Wi-Fi down or HA disconnected: red X over the signal icon
+- Wi-Fi is not configured: dim signal icon, blinking
+- While connecting, retrying, or disconnected: the signal icon blinks; no red X
 - Charging: neutral grey bolt in the battery icon, no bright fill
 - No clock, no battery percentage
+- The battery icon is monochrome, same color as the signal bars
 
 ## Dynamic pages and titles
 
@@ -117,10 +121,13 @@ The entity list is cached for 60 seconds.
 
 Fields:
 
-- Brightness, 1-100%, default 30%
+- Theme: `Flipper` (default) or `Classic`
+- Fallback brightness, 1-100%, default 30%
+- Day/night brightness and screen-off timeouts
 - Dynamic page blocks: title + eight slots
 - Each slot: entity ID, display name, optional AUX entity, optional AUX name
 - Climate slots: checkboxes for allowed MODE values (COOL/HEAT/DRY/FAN/AUTO)
+- Hostname used for `http://<hostname>.local/` and OTA
 - Wi-Fi SSID and password
 - Home Assistant base URL
 - Long-lived access token
@@ -156,6 +163,9 @@ and empty pages are kept as configured.
 | B | run the focused entity |
 | B long press | open detail view |
 | 1-8 | direct hotkey for the current page |
+| FACES keypad 1-8 | direct hotkey for the current page |
+| FACES keypad 0 / A | back |
+| FACES keypad = / Enter | run the focused entity or confirm |
 | A / C in non-AC detail | brightness or target temperature |
 | B in non-AC detail | back |
 
@@ -207,6 +217,17 @@ pio run
 pio run -t upload --upload-port /dev/cu.usbserial-5A6C0461241
 pio device monitor -p /dev/cu.usbserial-5A6C0461241 -b 115200
 ```
+
+After the first USB flash, updates can be pushed over Wi-Fi:
+
+```sh
+pio run -e m5stack-core-ota -t upload
+```
+
+The OTA environment targets `10.0.0.217` and uses the OTA password
+`haremote`; update `upload_port` in `platformio.ini` if the device IP changes.
+The configured hostname (`ha-remote` by default) is advertised over mDNS and
+used as the OTA hostname.
 
 ## Files
 

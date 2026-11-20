@@ -1,10 +1,12 @@
 // =====================================================================
 //  Home Control - Home Assistant remote for M5Stack Core Basic v2.7
-//  3x3 grid, live state via Home Assistant WebSocket API.
+//  Eight-row menu, live state via Home Assistant WebSocket API.
 // =====================================================================
 
 #include <M5Unified.h>
 #include <WiFi.h>
+#include <ArduinoOTA.h>
+#include <Wire.h>
 #include <time.h>
 #include <math.h>
 #include <esp_heap_caps.h>
@@ -32,6 +34,61 @@ static constexpr uint16_t C_MAGENTA  = TFT_MAGENTA;
 static constexpr uint16_t C_RED      = TFT_RED;
 static constexpr uint16_t C_ORANGE   = TFT_ORANGE;
 
+// Flipper palette
+static constexpr uint16_t F_BAR     = 0x28A1;
+static constexpr uint16_t F_ORANGE  = 0xE4C7;
+static constexpr uint16_t F_CREAM   = 0xF739;
+static constexpr uint16_t F_DARK    = 0x1860;
+static constexpr uint16_t F_LINE    = 0x8A62;
+static constexpr uint16_t F_DIM     = 0x6A28;
+static constexpr uint16_t F_ICON    = 0xF739;
+static constexpr uint16_t F_TRACK   = 0xC3C5;
+
+struct ThemeColors {
+    uint16_t bg, barBg, barText, dotOn, dotOff;
+    uint16_t rowBg, rowSel, rowText, rowSelText;
+    uint16_t numBg, numText, numBgEmpty, numTextEmpty;
+    uint16_t numSelBg, numSelText, numberLine, divider;
+    uint16_t cardBg, cardLine, text, dim, off;
+    uint16_t accentLight, accentSwitch, accentClimate, accentScene;
+    uint16_t accentMedia, accentSensor, accentCover;
+    uint16_t iconWell, barTrack;
+    uint16_t editBg, editText;
+    bool dotted;
+};
+
+static ThemeColors g_theme;
+
+static void applyTheme() {
+    if (g_config.theme == 1) {
+        g_theme = {
+            C_BG, C_BAR, TFT_LIGHTGREY, TFT_WHITE, C_DIM,
+            TFT_BLACK, TFT_NAVY, TFT_WHITE, C_GREEN,
+            0x2104, TFT_WHITE, C_BAR, TFT_BLACK,
+            C_GREEN, TFT_BLACK, 0, C_DIVIDER,
+            C_CARD, C_LINE, TFT_WHITE, C_DIM, C_OFF,
+            C_YELLOW, C_GREEN, C_CYAN, C_GREEN,
+            C_MAGENTA, C_ORANGE, C_CYAN,
+            0x2104, 0x2945,
+            TFT_MAROON, C_YELLOW,
+            false
+        };
+    } else {
+        g_theme = {
+            F_CREAM, F_BAR, F_CREAM, F_CREAM, F_LINE,
+            F_ORANGE, F_DARK, F_DARK, F_CREAM,
+            F_ORANGE, F_DARK, F_ORANGE, F_DARK,
+            F_ORANGE, F_DARK, F_LINE, F_LINE,
+            F_ORANGE, F_LINE, F_DARK, F_DIM, F_DIM,
+            F_DARK, F_DARK, F_DARK, F_DARK,
+            F_DARK, F_DARK, F_DARK,
+            F_ICON, F_TRACK,
+            F_DARK, F_CREAM,
+            true
+        };
+    }
+}
+
 static constexpr int SCR_W = 320;
 static constexpr int SCR_H = 240;
 static constexpr int SB_H  = 24;
@@ -49,6 +106,7 @@ static int g_focus = 0;
 static bool g_detail = false;
 static int g_detailGlobal = -1;
 static bool g_haStarted = false;
+static bool g_otaStarted = false;
 static bool g_linkBlinkOn = true;
 
 static bool g_haOnline = false;
@@ -88,6 +146,55 @@ static int g_acCursor = 0;
 static bool g_acEditing = false;
 static float g_acDraftTemp = NAN;
 
+static uint32_t g_lastKeyPoll = 0;
+static uint32_t g_lastKeyTime = 0;
+static char g_lastKey = 0;
+
+static void keypadInit() {
+    Wire.begin(21, 22, 100000);
+    Wire.beginTransmission(0x08);
+    uint8_t err = Wire.endTransmission();
+    Serial.printf("[keypad] i2c 0x08 %s\n", err == 0 ? "present" : "missing");
+}
+
+static uint8_t keypadReadByte() {
+    // New Calculator3 uses register 0x00; older MEGA328 panels answer a
+    // plain request. Try both so either panel works.
+    Wire.beginTransmission(0x08);
+    Wire.write((uint8_t)0x00);
+    if (Wire.endTransmission(false) == 0) {
+        if (Wire.requestFrom((uint8_t)0x08, (uint8_t)1) == 1) {
+            uint8_t value = Wire.read();
+            if (value != 0) return value;
+        }
+    }
+    if (Wire.requestFrom((uint8_t)0x08, (uint8_t)1) == 1) {
+        return Wire.read();
+    }
+    return 0;
+}
+
+static char keypadPoll() {
+    uint32_t now = millis();
+    if (now - g_lastKeyPoll < 20) return 0;
+    g_lastKeyPoll = now;
+
+    uint8_t raw = keypadReadByte();
+    if (raw == 0 || raw == 0xFF) return 0;
+
+    char c = 0;
+    if (raw >= '0' && raw <= '9') c = (char)raw;
+    else if (raw == 'A' || raw == '=') c = (char)raw;
+    else if (raw == 0x0D) c = '\r';
+    if (c == 0) return 0;
+
+    if (c == g_lastKey && now - g_lastKeyTime < 120) return 0;
+    g_lastKey = c;
+    g_lastKeyTime = now;
+    Serial.printf("[keypad] 0x%02X '%c'\n", raw, c);
+    return c;
+}
+
 static void sfxArrow() {
     M5.Speaker.playWav(sfx_arrow, sfx_arrow_len, 1, -1, true);
 }
@@ -104,10 +211,24 @@ static int g_appliedBrightness = -1;
 // ---------------------------------------------------------------------
 //  Text helpers
 // ---------------------------------------------------------------------
+static void setUiFont(LovyanGFX& g, uint8_t size) {
+    if (size <= 1) {
+        // Small captions keep the compact bitmap font.
+        g.setTextFont(1);
+        g.setTextSize(1);
+    } else if (size == 2) {
+        g.setFont(&lgfx::fonts::FreeSansBold12pt7b);
+        g.setTextSize(1);
+    } else {
+        g.setFont(&lgfx::fonts::FreeSansBold18pt7b);
+        g.setTextSize(1);
+    }
+}
+
 static void txt(LovyanGFX& g, const char* s, int x, int y,
                 uint16_t color, uint8_t size = 2) {
     g.setTextDatum(TL_DATUM);
-    g.setTextSize(size);
+    setUiFont(g, size);
     g.setTextColor(color);
     g.drawString(s, x, y);
 }
@@ -115,7 +236,7 @@ static void txt(LovyanGFX& g, const char* s, int x, int y,
 static void txtC(LovyanGFX& g, const char* s, int x, int y,
                  uint16_t color, uint8_t size = 2) {
     g.setTextDatum(MC_DATUM);
-    g.setTextSize(size);
+    setUiFont(g, size);
     g.setTextColor(color);
     g.drawString(s, x, y);
 }
@@ -123,9 +244,25 @@ static void txtC(LovyanGFX& g, const char* s, int x, int y,
 static void txtR(LovyanGFX& g, const char* s, int x, int y,
                  uint16_t color, uint8_t size = 2) {
     g.setTextDatum(TR_DATUM);
-    g.setTextSize(size);
+    setUiFont(g, size);
     g.setTextColor(color);
     g.drawString(s, x, y);
+}
+
+// Truncate by pixel width so proportional fonts never overlap the next field.
+static String fitText(LovyanGFX& g, const String& in, int maxWidth,
+                      uint8_t size) {
+    if (in.isEmpty() || maxWidth <= 0) return String("");
+    setUiFont(g, size);
+    if (g.textWidth(in.c_str()) <= maxWidth) return in;
+
+    String out = in;
+    while (out.length() > 1) {
+        String probe = out + "~";
+        if (g.textWidth(probe.c_str()) <= maxWidth) break;
+        out.remove(out.length() - 1);
+    }
+    return out + "~";
 }
 
 static String shorten(const String& in, size_t maxChars) {
@@ -221,19 +358,19 @@ static void scheduleTick() {
 // ---------------------------------------------------------------------
 static uint16_t typeAccent(EntityType type) {
     switch (type) {
-        case EntityType::Light:   return C_YELLOW;
-        case EntityType::Switch:  return C_GREEN;
-        case EntityType::Climate: return C_CYAN;
-        case EntityType::Scene:   return C_GREEN;
-        case EntityType::Media:   return C_MAGENTA;
-        case EntityType::Sensor:  return C_ORANGE;
-        case EntityType::Cover:   return C_CYAN;
-        default:                  return C_DIM;
+        case EntityType::Light:   return g_theme.accentLight;
+        case EntityType::Switch:  return g_theme.accentSwitch;
+        case EntityType::Climate: return g_theme.accentClimate;
+        case EntityType::Scene:   return g_theme.accentScene;
+        case EntityType::Media:   return g_theme.accentMedia;
+        case EntityType::Sensor:  return g_theme.accentSensor;
+        case EntityType::Cover:   return g_theme.accentCover;
+        default:                  return g_theme.dim;
     }
 }
 
 static void iconBulb(LovyanGFX& g, int x, int y, bool on, uint16_t accent) {
-    uint16_t c = on ? accent : C_OFF;
+    uint16_t c = on ? accent : g_theme.off;
     int cx = x + 14, cy = y + 11;
     g.fillCircle(cx, cy, 8, c);
     g.fillRect(cx - 4, cy + 6, 8, 4, c);
@@ -247,7 +384,7 @@ static void iconBulb(LovyanGFX& g, int x, int y, bool on, uint16_t accent) {
 }
 
 static void iconClimate(LovyanGFX& g, int x, int y, bool on, uint16_t accent) {
-    uint16_t c = on ? accent : C_OFF;
+    uint16_t c = on ? accent : g_theme.off;
     int cx = x + 14, cy = y + 14;
     g.drawFastVLine(cx, cy - 11, 22, c);
     g.drawLine(cx - 9, cy - 6, cx + 9, cy + 6, c);
@@ -258,7 +395,7 @@ static void iconClimate(LovyanGFX& g, int x, int y, bool on, uint16_t accent) {
 }
 
 static void iconMedia(LovyanGFX& g, int x, int y, bool on, uint16_t accent) {
-    uint16_t c = on ? accent : C_OFF;
+    uint16_t c = on ? accent : g_theme.off;
     g.drawRect(x + 2, y + 5, 24, 16, c);
     g.drawRect(x + 3, y + 6, 22, 14, c);
     g.fillTriangle(x + 12, y + 9, x + 12, y + 17, x + 19, y + 13, c);
@@ -300,16 +437,16 @@ static void iconCover(LovyanGFX& g, int x, int y, uint16_t accent) {
 }
 
 static void iconFor(LovyanGFX& g, int x, int y, const EntityState& e) {
-    uint16_t accent = e.available ? typeAccent(e.type) : C_OFF;
+    uint16_t accent = e.available ? typeAccent(e.type) : g_theme.off;
     switch (e.type) {
         case EntityType::Light:   iconBulb(g, x, y, e.on, accent); break;
-        case EntityType::Switch:  iconPower(g, x, y, e.on ? accent : C_OFF); break;
+        case EntityType::Switch:  iconPower(g, x, y, e.on ? accent : g_theme.off); break;
         case EntityType::Climate: iconClimate(g, x, y, e.on, accent); break;
         case EntityType::Media:   iconMedia(g, x, y, e.on, accent); break;
         case EntityType::Scene:   iconScene(g, x, y, accent); break;
         case EntityType::Sensor:  iconSensor(g, x, y, accent); break;
         case EntityType::Cover:   iconCover(g, x, y, accent); break;
-        default:                  iconSensor(g, x, y, C_OFF); break;
+        default:                  iconSensor(g, x, y, g_theme.off); break;
     }
 }
 
@@ -372,14 +509,14 @@ static String entityStateText(const EntityState& e) {
 }
 
 static uint16_t entityStateColor(const EntityState& e) {
-    if (e.id.isEmpty() || !e.available) return C_OFF;
+    if (e.id.isEmpty() || !e.available) return g_theme.off;
     switch (e.type) {
         case EntityType::Light:
         case EntityType::Switch:
         case EntityType::Climate:
         case EntityType::Media:
         case EntityType::Cover:
-            return e.on ? typeAccent(e.type) : C_OFF;
+            return e.on ? typeAccent(e.type) : g_theme.off;
         default:
             return typeAccent(e.type);
     }
@@ -403,7 +540,7 @@ static const char* typeLabel(EntityType type) {
 // ---------------------------------------------------------------------
 static void drawBattery(LovyanGFX& g, int x, int y, int pct, bool charging) {
     // Monochrome battery icon, same color as the signal bars.
-    const uint16_t mono = TFT_LIGHTGREY;
+    const uint16_t mono = g_theme.barText;
     g.drawRect(x, y, 18, 12, mono);
     g.drawRect(x - 1, y - 1, 20, 14, mono);
     g.fillRect(x + 20, y + 4, 2, 5, mono);
@@ -437,7 +574,7 @@ static void drawLinkIcon(LovyanGFX& g, int x, int y) {
     }
     for (int i = 0; i < 4; i++) {
         int h = 4 + i * 3;
-        uint16_t c = (i < bars) ? TFT_LIGHTGREY : C_OFF;
+        uint16_t c = (i < bars) ? g_theme.barText : g_theme.dotOff;
         g.fillRect(x + i * 4, y + 13 - h, 3, h, c);
     }
 }
@@ -448,7 +585,7 @@ static void drawPageDots(LovyanGFX& g) {
     int startX = 160 - totalW / 2;
     for (int p = 0; p < pages; p++) {
         g.fillRect(startX + p * 10, 9, 6, 6,
-                   (p == g_page) ? TFT_WHITE : C_DIM);
+                   (p == g_page) ? g_theme.dotOn : g_theme.dotOff);
     }
 }
 
@@ -463,8 +600,8 @@ static void drawStatusTitle(LovyanGFX& g) {
         title = (g_page < MAX_PAGES) ? g_config.pageTitles[g_page] : String("");
         if (title.isEmpty()) title = "PAGE" + String(g_page + 1);
     }
-    title = shorten(title, 7);
-    txt(g, title.c_str(), 6, 5, TFT_LIGHTGREY, 2);
+    title = fitText(g, title, 86, 2);
+    txt(g, title.c_str(), 6, 5, g_theme.barText, 2);
 }
 
 static void drawStatusCenter(LovyanGFX& g) {
@@ -473,7 +610,7 @@ static void drawStatusCenter(LovyanGFX& g) {
 }
 
 static void drawStatusBar(LovyanGFX& g) {
-    g.fillRect(0, 0, SCR_W, SB_H, C_BAR);
+    g.fillRect(0, 0, SCR_W, SB_H, g_theme.barBg);
     drawStatusTitle(g);
     drawStatusCenter(g);
     drawLinkIcon(g, 270, 5);
@@ -483,33 +620,50 @@ static void drawStatusBar(LovyanGFX& g) {
 // ---------------------------------------------------------------------
 //  Menu list
 // ---------------------------------------------------------------------
+static void drawThemeDivider(LovyanGFX& g, int y) {
+    if (g_theme.dotted) {
+        for (int x = 0; x < SCR_W; x += 3) {
+            g.drawPixel(x, y, g_theme.divider);
+        }
+    } else {
+        g.drawFastHLine(0, y, SCR_W, g_theme.divider);
+    }
+}
+
 static void drawMenuRow(LovyanGFX& g, int slot, const EntityState& e, bool selected) {
     int y = MENU_Y + slot * MENU_ROW_H;
     bool empty = e.id.isEmpty();
 
-    g.fillRect(0, y, SCR_W, MENU_ROW_H, selected ? TFT_NAVY : TFT_BLACK);
+    g.fillRect(0, y, SCR_W, MENU_ROW_H, selected ? g_theme.rowSel : g_theme.rowBg);
 
-    uint16_t numberBg = selected ? C_GREEN : (empty ? C_BAR : 0x2104);
-    uint16_t numberFg = selected ? TFT_BLACK : (empty ? TFT_BLACK : TFT_WHITE);
+    uint16_t numberBg = selected ? g_theme.numSelBg
+                                 : (empty ? g_theme.numBgEmpty : g_theme.numBg);
+    uint16_t numberFg = selected ? g_theme.numSelText
+                                 : (empty ? g_theme.numTextEmpty : g_theme.numText);
     g.fillRect(0, y, 24, MENU_ROW_H, numberBg);
+    if (g_theme.numberLine != 0) {
+        g.drawFastVLine(24, y, MENU_ROW_H, g_theme.numberLine);
+    }
 
     char number[2] = { char('1' + slot), 0 };
-    txt(g, number, 6, y + 5, numberFg, 2);
+    txt(g, number, 6, y + 4, numberFg, 2);
 
-    // Subtle divider between rows, including the index column.
     if (slot < GRID_SLOTS - 1) {
-        g.drawFastHLine(0, y + MENU_ROW_H - 1, SCR_W, C_DIVIDER);
+        drawThemeDivider(g, y + MENU_ROW_H - 1);
     }
 
     // Unconfigured slots keep their numbered row but have no label.
     if (empty) return;
 
-    String name = shorten(displayName(e), 12);
-    txt(g, name.c_str(), 32, y + 5, selected ? C_GREEN : TFT_WHITE, 2);
+    String state = fitText(g, entityStateText(e), 140, 2);
+    int nameWidth = 314 - 32 - 8 - (int)g.textWidth(state.c_str());
+    if (nameWidth < 90) nameWidth = 90;
+    String name = fitText(g, displayName(e), nameWidth, 2);
 
-    String state = shorten(entityStateText(e), 11);
-    txtR(g, state.c_str(), 314, y + 5,
-         selected ? C_GREEN : entityStateColor(e), 2);
+    txt(g, name.c_str(), 32, y + 4,
+        selected ? g_theme.rowSelText : g_theme.rowText, 2);
+    txtR(g, state.c_str(), 314, y + 4,
+         selected ? g_theme.rowSelText : entityStateColor(e), 2);
 }
 
 static void drawMenu(LovyanGFX& g) {
@@ -662,24 +816,37 @@ static String acCurrentText(const EntityState& e) {
 static void drawAcRow(LovyanGFX& g, int slot, const String& label,
                       const String& value, bool selected, bool editing) {
     int y = MENU_Y + slot * MENU_ROW_H;
-    uint16_t bg = editing ? TFT_MAROON : (selected ? TFT_NAVY : TFT_BLACK);
+    uint16_t bg = editing ? g_theme.editBg
+                          : (selected ? g_theme.rowSel : g_theme.rowBg);
     g.fillRect(0, y, SCR_W, MENU_ROW_H, bg);
 
-    uint16_t numberBg = editing ? TFT_MAROON : (selected ? C_GREEN : 0x2104);
-    uint16_t numberFg = editing ? C_YELLOW : (selected ? TFT_BLACK : TFT_WHITE);
+    uint16_t numberBg = editing ? g_theme.editBg
+                                : (selected ? g_theme.numSelBg : g_theme.numBg);
+    uint16_t numberFg = editing ? g_theme.editText
+                                : (selected ? g_theme.numSelText : g_theme.numText);
     g.fillRect(0, y, 24, MENU_ROW_H, numberBg);
-
-    char number[2] = { char('1' + slot), 0 };
-    txt(g, number, 6, y + 5, numberFg, 2);
-
-    if (slot < GRID_SLOTS - 1) {
-        g.drawFastHLine(0, y + MENU_ROW_H - 1, SCR_W, C_DIVIDER);
+    if (g_theme.numberLine != 0) {
+        g.drawFastVLine(24, y, MENU_ROW_H, g_theme.numberLine);
     }
 
-    uint16_t labelColor = editing ? C_YELLOW : (selected ? C_GREEN : TFT_WHITE);
-    uint16_t valueColor = editing ? C_YELLOW : (selected ? C_GREEN : TFT_LIGHTGREY);
-    txt(g, label.c_str(), 32, y + 5, labelColor, 2);
-    txtR(g, value.c_str(), 314, y + 5, valueColor, 2);
+    char number[2] = { char('1' + slot), 0 };
+    txt(g, number, 6, y + 4, numberFg, 2);
+
+    if (slot < GRID_SLOTS - 1) {
+        drawThemeDivider(g, y + MENU_ROW_H - 1);
+    }
+
+    uint16_t labelColor = editing ? g_theme.editText
+                                  : (selected ? g_theme.rowSelText : g_theme.rowText);
+    uint16_t valueColor = editing ? g_theme.editText
+                                  : (selected ? g_theme.rowSelText : g_theme.text);
+    String labelText = fitText(g, label, 128, 2);
+    int valueWidth = 314 - 32 - 8 - (int)g.textWidth(labelText.c_str());
+    if (valueWidth < 80) valueWidth = 80;
+    String valueText = fitText(g, value, valueWidth, 2);
+
+    txt(g, labelText.c_str(), 32, y + 4, labelColor, 2);
+    txtR(g, valueText.c_str(), 314, y + 4, valueColor, 2);
 }
 
 static String acLabelFor(const EntityState& e, int index, int slot) {
@@ -761,23 +928,28 @@ static String detailCaption(const EntityState& e) {
 }
 
 static void drawDetailHeader(LovyanGFX& g, const EntityState& e) {
-    txt(g, typeLabel(e.type), 12, 31, C_DIM, 1);
+    txt(g, typeLabel(e.type), 12, 31, g_theme.dim, 1);
 
-    String name = shorten(displayName(e), 17);
-    txt(g, name.c_str(), 12, 42, C_TEXT, 2);
-    txtR(g, shorten(entityStateText(e), 14).c_str(), 308, 44, entityStateColor(e), 1);
+    String state = fitText(g, entityStateText(e), 100, 2);
+    int nameWidth = 308 - 12 - 8 - (int)g.textWidth(state.c_str());
+    if (nameWidth < 90) nameWidth = 90;
+    String name = fitText(g, displayName(e), nameWidth, 2);
+
+    txt(g, name.c_str(), 12, 43, g_theme.text, 2);
+    txtR(g, state.c_str(), 308, 43, entityStateColor(e), 2);
 }
 
 static void drawDetailPanel(LovyanGFX& g, const EntityState& e) {
-    g.fillRect(8, 62, 304, 120, C_CARD);
-    g.drawRect(8, 62, 304, 120, C_LINE);
-    g.fillRect(8, 62, 4, 120, e.available ? typeAccent(e.type) : C_OFF);
+    g.fillRect(8, 62, 304, 120, g_theme.cardBg);
+    g.drawRect(8, 62, 304, 120, g_theme.cardLine);
+    g.fillRect(8, 62, 4, 120, e.available ? typeAccent(e.type) : g_theme.off);
 
-    g.fillRect(22, 80, 48, 48, 0x2104);
+    g.fillRect(22, 80, 48, 48, g_theme.iconWell);
     iconFor(g, 32, 90, e);
 
-    txt(g, detailValue(e).c_str(), 88, 72, C_TEXT, 3);
-    txt(g, detailCaption(e).c_str(), 88, 102, C_DIM, 1);
+    String value = fitText(g, detailValue(e), 200, 3);
+    txt(g, value.c_str(), 88, 72, g_theme.text, 3);
+    txt(g, detailCaption(e).c_str(), 88, 102, g_theme.dim, 1);
 
     int barPct = -1;
     if (e.type == EntityType::Light) {
@@ -788,12 +960,12 @@ static void drawDetailPanel(LovyanGFX& g, const EntityState& e) {
     }
     if (barPct >= 0) {
         barPct = constrain(barPct, 0, 100);
-        g.fillRect(88, 118, 200, 10, 0x2945);
+        g.fillRect(88, 118, 200, 10, g_theme.barTrack);
         if (barPct > 0) g.fillRect(88, 118, 2 * barPct, 10, typeAccent(e.type));
-        g.drawRect(88, 118, 200, 10, C_LINE);
+        g.drawRect(88, 118, 200, 10, g_theme.cardLine);
     }
 
-    g.drawFastHLine(22, 140, 276, C_LINE);
+    g.drawFastHLine(22, 140, 276, g_theme.cardLine);
 
     String bottomLeft = shorten(e.id, 30);
     String bottomRight;
@@ -807,8 +979,8 @@ static void drawDetailPanel(LovyanGFX& g, const EntityState& e) {
     } else if (e.type == EntityType::Sensor) {
         bottomRight = shorten(e.detail, 20);
     }
-    txt(g, bottomLeft.c_str(), 22, 150, C_DIM, 1);
-    txtR(g, bottomRight.c_str(), 304, 150, C_DIM, 1);
+    txt(g, bottomLeft.c_str(), 22, 150, g_theme.dim, 1);
+    txtR(g, bottomRight.c_str(), 304, 150, g_theme.dim, 1);
 }
 
 static void drawDetail(LovyanGFX& g, const EntityState& e) {
@@ -820,7 +992,7 @@ static void drawDetail(LovyanGFX& g, const EntityState& e) {
 //  Render
 // ---------------------------------------------------------------------
 static void renderAll(LovyanGFX& g) {
-    g.fillScreen(C_BG);
+    g.fillScreen(g_theme.bg);
     drawStatusBar(g);
 
     if (g_detail && g_detailGlobal >= 0) {
@@ -840,7 +1012,7 @@ static void renderInitial() {
 
 static void redrawContent() {
     M5.Display.startWrite();
-    M5.Display.fillRect(0, SB_H, SCR_W, SCR_H - SB_H, C_BG);
+    M5.Display.fillRect(0, SB_H, SCR_W, SCR_H - SB_H, g_theme.bg);
     if (g_detail && g_detailGlobal >= 0) {
         if (acDetailActive()) drawAcDetail(M5.Display, g_cards[g_detailGlobal]);
         else drawDetail(M5.Display, g_cards[g_detailGlobal]);
@@ -861,7 +1033,7 @@ static void redrawMenuPage() {
 static void redrawDetail() {
     if (g_detailGlobal < 0 || g_detailGlobal >= g_config.entityCount) return;
     M5.Display.startWrite();
-    M5.Display.fillRect(0, SB_H, SCR_W, 39, C_BG);
+    M5.Display.fillRect(0, SB_H, SCR_W, 39, g_theme.bg);
     drawDetailHeader(M5.Display, g_cards[g_detailGlobal]);
     drawDetailPanel(M5.Display, g_cards[g_detailGlobal]);
     M5.Display.endWrite();
@@ -903,19 +1075,19 @@ static void redrawStatusRegions() {
 
     M5.Display.startWrite();
     if (g_statusTitleDirty) {
-        M5.Display.fillRect(0, 0, 96, SB_H, C_BAR);
+        M5.Display.fillRect(0, 0, 96, SB_H, g_theme.barBg);
         drawStatusTitle(M5.Display);
     }
     if (g_statusCenterDirty) {
-        M5.Display.fillRect(92, 0, 144, SB_H, C_BAR);
+        M5.Display.fillRect(92, 0, 144, SB_H, g_theme.barBg);
         drawStatusCenter(M5.Display);
     }
     if (g_statusLinkDirty) {
-        M5.Display.fillRect(264, 0, 26, SB_H, C_BAR);
+        M5.Display.fillRect(264, 0, 26, SB_H, g_theme.barBg);
         drawLinkIcon(M5.Display, 270, 5);
     }
     if (g_statusBatteryDirty) {
-        M5.Display.fillRect(290, 0, 30, SB_H, C_BAR);
+        M5.Display.fillRect(290, 0, 30, SB_H, g_theme.barBg);
         drawBattery(M5.Display, 294, 6, M5.Power.getBatteryLevel(),
                     M5.Power.isCharging());
     }
@@ -1633,9 +1805,11 @@ void setup() {
     Serial.println("[boot] serial ready");
 
     configLoad();
+    applyTheme();
     auto cfg = M5.config();
     M5.begin(cfg);
     M5.Speaker.setVolume(96);
+    keypadInit();
 
     g_lastBatteryPct = M5.Power.getBatteryLevel();
     g_lastCharging = M5.Power.isCharging();
@@ -1692,6 +1866,9 @@ void loop() {
     networkLoop();
     handleSerialInput();
 
+    char keypadKey = keypadPoll();
+    if (keypadKey) handleKey(keypadKey);
+
     wl_status_t wifiNow = WiFi.status();
     if (wifiNow == WL_CONNECTED && g_prevWifiLink != WL_CONNECTED) {
         // Wi-Fi is back: resync every page and let HA reconnect.
@@ -1699,7 +1876,31 @@ void loop() {
         g_refreshIndex = -1;
         g_statusLinkDirty = true;
     }
+    if (wifiNow != WL_CONNECTED) g_otaStarted = false;
     g_prevWifiLink = wifiNow;
+
+    if (!g_otaStarted && wifiNow == WL_CONNECTED) {
+        ArduinoOTA.setHostname(g_config.hostname.c_str());
+        ArduinoOTA.setPassword("haremote");
+        ArduinoOTA.onStart([]() { Serial.println("[ota] start"); });
+        ArduinoOTA.onEnd([]() { Serial.println("[ota] end"); });
+        ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+            static int lastPct = -1;
+            int pct = total ? (progress * 100 / total) : 0;
+            if (pct / 10 != lastPct) {
+                lastPct = pct / 10;
+                Serial.printf("[ota] %d%%\n", pct);
+            }
+        });
+        ArduinoOTA.onError([](ota_error_t error) {
+            Serial.printf("[ota] error %u\n", (unsigned)error);
+        });
+        ArduinoOTA.begin();
+        g_otaStarted = true;
+        Serial.printf("[ota] ready http://%s/ password=haremote\n",
+                      WiFi.localIP().toString().c_str());
+    }
+    if (g_otaStarted) ArduinoOTA.handle();
 
     if (!g_haStarted && wifiNow == WL_CONNECTED && haConfigured()) {
         haBegin();

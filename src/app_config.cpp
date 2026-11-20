@@ -10,6 +10,7 @@
 
 static const char* NVS_NAMESPACE = "haremote";
 static const char* DEFAULT_HA_URL = "http://10.0.0.11:8123";
+static const char* DEFAULT_HOSTNAME = "ha-remote";
 
 AppConfig g_config;
 
@@ -22,6 +23,25 @@ static bool g_mdnsStarted = false;
 static uint32_t g_connectStart = 0;
 static uint32_t g_lastReconnect = 0;
 
+static String sanitizeHostname(const String& value) {
+    String in = value;
+    in.trim();
+    if (in.endsWith(".local")) in = in.substring(0, in.length() - 6);
+    String out;
+    out.reserve(32);
+    for (size_t i = 0; i < in.length() && out.length() < 32; i++) {
+        char c = (char)tolower((unsigned char)in[i]);
+        if (isalnum((unsigned char)c)) {
+            out += c;
+        } else if (c == '-' && out.length() > 0 && !out.endsWith("-")) {
+            out += '-';
+        }
+    }
+    while (out.endsWith("-")) out.remove(out.length() - 1);
+    if (out.isEmpty()) out = DEFAULT_HOSTNAME;
+    return out;
+}
+
 // ---------------------------------------------------------------------
 //  NVS
 // ---------------------------------------------------------------------
@@ -30,6 +50,7 @@ void configLoad() {
     p.begin(NVS_NAMESPACE, true);
     g_config.ssid = p.getString("ssid", "");
     g_config.pass = p.getString("pass", "");
+    g_config.hostname = sanitizeHostname(p.getString("host", DEFAULT_HOSTNAME));
     g_config.haUrl = p.getString("url", DEFAULT_HA_URL);
     g_config.haToken = p.getString("token", "");
     for (int i = 0; i < MAX_ENTITIES; i++) {
@@ -76,6 +97,7 @@ void configLoad() {
     int bright = p.getInt("bright", 30);
     if (bright < 1 || bright > 100) bright = 30;
     g_config.brightness = (uint8_t)bright;
+    g_config.theme = (uint8_t)constrain(p.getInt("theme", 0), 0, 1);
 
     g_config.dayStart = constrain(p.getInt("ds", 7 * 60), 0, 1439);
     g_config.dayEnd = constrain(p.getInt("de", 21 * 60), 0, 1439);
@@ -107,11 +129,13 @@ bool configSave() {
 
     putStringKey("ssid", g_config.ssid);
     putStringKey("pass", g_config.pass);
+    putStringKey("host", g_config.hostname);
     putStringKey("url", g_config.haUrl);
     putStringKey("token", g_config.haToken);
     putIntKey("pages", g_config.pageCount);
     putIntKey("count", g_config.entityCount);
     putIntKey("bright", g_config.brightness);
+    putIntKey("theme", g_config.theme);
 
     // Only persist existing slots. Empty slots are removed so the small NVS
     // partition does not fill with hundreds of empty keys.
@@ -293,6 +317,7 @@ static void handleRoot() {
     page += g_apMode ? "Mode: access point" : "Mode: station";
     page += "<br>Address: http://" + htmlEscape(networkIp());
     page += "<br>Wi-Fi: " + wifiLabel;
+    page += "<br>Host: " + htmlEscape(g_config.hostname) + ".local";
     page += "<br>Home Assistant: <b style=\"color:" + haColor + "\">" + haLabel + "</b>";
     page += "<br>HA URL: " + htmlEscape(g_config.haUrl);
     page += "</div>";
@@ -300,6 +325,12 @@ static void handleRoot() {
     page += "</fieldset>";
 
     page += "<fieldset><legend>Display</legend>";
+    page += "<label>Theme</label><select name=\"theme\">";
+    page += "<option value=\"flipper\"" +
+            String(g_config.theme == 0 ? " selected" : "") + ">Flipper</option>";
+    page += "<option value=\"classic\"" +
+            String(g_config.theme == 1 ? " selected" : "") + ">Classic</option>";
+    page += "</select>";
     page += "<label>Fallback brightness (%)</label><input name=\"bright\" type=\"number\" min=\"1\" max=\"100\" value=\"" +
             String(g_config.brightness) + "\">";
     page += "<div class=\"pagehead\">Backlight Schedule</div>";
@@ -418,6 +449,8 @@ static void handleRoot() {
     page += "<div class=\"status\">Wi-Fi: " + wifiLabel +
             "<br>Home Assistant: <b style=\"color:" + haColor + "\">" + haLabel +
             "</b><br>HA URL: " + htmlEscape(g_config.haUrl) + "</div>";
+    page += "<label>Hostname (.local)</label><input name=\"host\" autocomplete=\"off\" value=\"" +
+            htmlEscape(g_config.hostname) + "\" placeholder=\"ha-remote\">";
     page += "<label>Wi-Fi SSID</label><input name=\"ssid\" autocomplete=\"off\" value=\"" +
             htmlEscape(g_config.ssid) + "\">";
     page += "<label>Wi-Fi password (leave blank to keep the saved password)</label>";
@@ -567,6 +600,7 @@ static void sendSaveError(const String& message) {
 static void handleSave() {
     String ssid = server.arg("ssid");
     String pass = server.arg("pass");
+    String hostname = sanitizeHostname(server.arg("host"));
     String url = server.arg("url");
     String token = server.arg("token");
     String brightArg = server.arg("bright");
@@ -590,6 +624,7 @@ static void handleSave() {
 
     g_config.ssid = ssid;
     if (!pass.isEmpty()) g_config.pass = pass;
+    g_config.hostname = hostname;
     g_config.haUrl = url;
     if (!token.isEmpty()) g_config.haToken = token;
 
@@ -597,6 +632,7 @@ static void handleSave() {
     if (bright < 1) bright = 30;
     if (bright > 100) bright = 100;
     g_config.brightness = (uint8_t)bright;
+    g_config.theme = server.arg("theme") == "classic" ? 1 : 0;
 
     g_config.dayStart = parseTime(server.arg("dstart"), g_config.dayStart);
     g_config.dayEnd = parseTime(server.arg("dend"), g_config.dayEnd);
@@ -719,6 +755,7 @@ void networkBegin() {
 
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
+    WiFi.setHostname(g_config.hostname.c_str());
     WiFi.begin(g_config.ssid.c_str(), g_config.pass.c_str());
     g_apMode = false;
     g_connectStart = millis();
@@ -738,7 +775,7 @@ void networkLoop() {
             Serial.printf("[net] station ssid=%s ip=%s rssi=%d\n",
                           WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
                           WiFi.RSSI());
-            if (!g_mdnsStarted && MDNS.begin("ha-remote")) {
+            if (!g_mdnsStarted && MDNS.begin(g_config.hostname.c_str())) {
                 MDNS.addService("http", "tcp", 80);
                 g_mdnsStarted = true;
             }
@@ -775,6 +812,7 @@ String networkIp() {
 //  Serial console
 // ---------------------------------------------------------------------
 static void printConfig() {
+    Serial.printf("[cfg] hostname=%s.local\n", g_config.hostname.c_str());
     Serial.printf("[cfg] wifi ssid=%s pass=%s\n",
                   g_config.ssid.c_str(), g_config.pass.isEmpty() ? "(none)" : "(saved)");
     Serial.printf("[cfg] ha url=%s token=%s\n",
