@@ -25,5 +25,16 @@ int main() {
     uint32_t lastInput = UINT32_MAX - 1000;
     uint32_t now = lastInput + 600000;
     assert(night(now - lastInput).phase == BacklightPhase::Dim);
-    std::puts("PASS: normal/dim/off boundaries, wake, disabled timers, brightness cap, rollover");
+    // Neither a schedule transition nor missing clock data may wake a screen.
+    BacklightPlan normal = {BacklightPhase::Normal, 30};
+    BacklightPlan dim = {BacklightPhase::Dim, 1};
+    BacklightPlan off = {BacklightPhase::Off, 0};
+    assert(limitAutomaticBacklight(normal, off).phase == BacklightPhase::Off);
+    assert(limitAutomaticBacklight(dim, off).phase == BacklightPhase::Off);
+    auto heldDim = limitAutomaticBacklight(normal, dim);
+    assert(heldDim.phase == BacklightPhase::Dim && heldDim.brightness == 1);
+    assert(limitAutomaticBacklight({BacklightPhase::Dim, 5}, dim).brightness == 1);
+    assert(limitAutomaticBacklight({BacklightPhase::Dim, 1}, {BacklightPhase::Dim, 2}).brightness == 1);
+    assert(limitAutomaticBacklight(off, dim).phase == BacklightPhase::Off);
+    std::puts("PASS: normal/dim/off boundaries, wake, disabled timers, brightness cap, rollover, no automatic brightening");
 }

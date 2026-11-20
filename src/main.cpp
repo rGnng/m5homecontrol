@@ -334,8 +334,8 @@ static void sfxSelect() {
 static uint32_t g_lastActivity = 0;
 static BacklightPhase g_backlightPhase = BacklightPhase::Normal;
 static int g_backlightOverride = -1;
-static int g_activePeriod = -1;
 static int g_appliedBrightness = -1;
+static uint8_t g_backlightPercent = 0;
 
 // ---------------------------------------------------------------------
 //  Text helpers
@@ -407,6 +407,7 @@ static bool validTemp(float value) {
 // ---------------------------------------------------------------------
 static void applyBacklightPercent(int percent) {
     percent = constrain(percent, 0, 100);
+    g_backlightPercent = (uint8_t)percent;
     int pwm = (percent * 255 + 50) / 100;
     if (pwm != g_appliedBrightness) {
         M5.Display.setBrightness((uint8_t)pwm);
@@ -416,12 +417,12 @@ static void applyBacklightPercent(int percent) {
 }
 
 static void renderInitial();
-static void scheduleTick();
+static void scheduleTick(bool explicitInput = false);
 
 static void noteActivity() {
     g_lastActivity = millis();
     g_backlightOverride = -1;
-    scheduleTick();
+    scheduleTick(true);
 }
 
 static bool inTimeRange(int now, int start, int end) {
@@ -445,7 +446,7 @@ static void applyBacklightPlan(BacklightPlan plan) {
     applyBacklightPercent(plan.brightness);
 }
 
-static void scheduleTick() {
+static void scheduleTick(bool explicitInput) {
     struct tm timeinfo;
     bool clockReady = getLocalTime(&timeinfo, 0) && timeinfo.tm_year >= 120;
     int period = -1;
@@ -454,11 +455,6 @@ static void scheduleTick() {
         bool isDay = inTimeRange(now, g_config.dayStart, g_config.dayEnd);
         bool isNight = inTimeRange(now, g_config.nightStart, g_config.nightEnd);
         period = isDay ? 0 : (isNight ? 1 : 0);
-    }
-    if (period != g_activePeriod) {
-        g_activePeriod = period;
-        g_lastActivity = millis();
-        g_backlightOverride = -1;
     }
     bool night = period == 1;
     uint8_t brightness = clockReady ? (night ? g_config.nightBrightness : g_config.dayBrightness)
@@ -475,6 +471,9 @@ static void scheduleTick() {
     } else if (g_backlightOverride == (int)BacklightPhase::Off) {
         plan = {BacklightPhase::Off, 0};
     }
+    if (!explicitInput) {
+        plan = limitAutomaticBacklight(plan, {g_backlightPhase, g_backlightPercent});
+    }
     applyBacklightPlan(plan);
 }
 
@@ -484,7 +483,7 @@ bool setDisplayMode(const String& mode) {
     } else if (mode == "dim" || mode == "off") {
         scheduleTick();
         g_backlightOverride = (int)(mode == "dim" ? BacklightPhase::Dim : BacklightPhase::Off);
-        scheduleTick();
+        scheduleTick(true);
     } else {
         return false;
     }
@@ -504,8 +503,6 @@ String backlightStatus() {
 // ---------------------------------------------------------------------
 static void animateHaCommandLeds() {
     if (!g_commandLedTask) return;
-    noteActivity();
-    scheduleTick();
     uint16_t color = g_theme.commandLedColor;
     uint32_t r = ((color >> 11) & 31) * 255 / 31;
     uint32_t g = ((color >> 5) & 63) * 255 / 63;
@@ -721,8 +718,7 @@ static void drawBattery(LovyanGFX& g, int x, int y, int pct, bool charging,
     if (fill > 0) g.fillRect(x + 2, y + 2, fill, 8, mono);
 }
 
-// Combined Wi-Fi + HA link indicator. A red X means either Wi-Fi is down or
-// the HA WebSocket is not authenticated.
+// Combined Wi-Fi + HA link indicator; blink while either connection is down.
 static void drawLinkIcon(LovyanGFX& g, int x, int y) {
     bool wifiUp = (WiFi.status() == WL_CONNECTED);
     bool linkUp = wifiUp && g_haOnline;
@@ -1094,7 +1090,7 @@ static void renderAll(LovyanGFX& g) {
     }
 }
 
-// Full initial draw only. Runtime updates use the partial redraw helpers.
+// Full draw for boot and palette transitions. Value updates use partial redraws.
 static void renderInitial() {
     M5.Display.startWrite();
     renderAll(M5.Display);
@@ -1613,7 +1609,9 @@ static void directSelect(int idx) {
 //  Input
 // ---------------------------------------------------------------------
 static void handleKey(char c) {
+    bool wakeOnly = g_backlightPhase == BacklightPhase::Off;
     noteActivity();
+    if (wakeOnly) return;
 
     // Keypad r1c1 (AC): short press sends 'A', long press sends backspace.
     // Always leave the panel, discarding any unconfirmed temperature edit.
@@ -1680,10 +1678,23 @@ static void handleKey(char c) {
     }
 }
 
+// Keep the wake-only decision until release, so holding B to wake cannot
+// subsequently open detail or toggle an item during that same press.
+static uint8_t g_wakeOnlyButtons = 0;
+
+static void noteButtonActivity() {
+    uint8_t pressed = (M5.BtnA.isPressed() ? 1 : 0) |
+                      (M5.BtnB.isPressed() ? 2 : 0) |
+                      (M5.BtnC.isPressed() ? 4 : 0);
+    if (!pressed) return;
+    if (g_backlightPhase == BacklightPhase::Off) g_wakeOnlyButtons |= pressed;
+    noteActivity();
+}
+
 static void handleButtons() {
     static bool aHeld = false, cHeld = false, bHeld = false;
 
-    if (M5.BtnA.wasPressed()) aHeld = true;
+    if (M5.BtnA.wasPressed()) aHeld = !(g_wakeOnlyButtons & 1);
     if (M5.BtnA.wasReleased()) {
         if (aHeld) {
             if (acDetailActive()) {
@@ -1694,9 +1705,10 @@ static void handleButtons() {
             }
         }
         aHeld = false;
+        g_wakeOnlyButtons &= ~1;
     }
 
-    if (M5.BtnC.wasPressed()) cHeld = true;
+    if (M5.BtnC.wasPressed()) cHeld = !(g_wakeOnlyButtons & 4);
     if (M5.BtnC.wasReleased()) {
         if (cHeld) {
             if (acDetailActive()) {
@@ -1707,9 +1719,10 @@ static void handleButtons() {
             }
         }
         cHeld = false;
+        g_wakeOnlyButtons &= ~4;
     }
 
-    if (M5.BtnB.wasPressed()) bHeld = true;
+    if (M5.BtnB.wasPressed()) bHeld = !(g_wakeOnlyButtons & 2);
     if (bHeld && M5.BtnB.pressedFor(600)) {
         if (g_detail) {
             goBack();
@@ -1721,6 +1734,7 @@ static void handleButtons() {
     if (M5.BtnB.wasReleased()) {
         if (bHeld) primaryAction();
         bHeld = false;
+        g_wakeOnlyButtons &= ~2;
     }
 }
 
@@ -1943,9 +1957,7 @@ void setup() {
 void loop() {
     M5.update();
     readPowerStatus();
-    if (M5.BtnA.isPressed() || M5.BtnB.isPressed() || M5.BtnC.isPressed()) {
-        noteActivity();
-    }
+    noteButtonActivity();
     networkLoop();
     handleSerialInput();
 

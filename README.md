@@ -4,7 +4,7 @@ A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 
 - M5Code-style menu: eight rows per page
 - Two themes: `Flipper` (default) and `Classic`
-- Original M5Code bitmap font for menu rows, states, and detail values
+- Bitmap font for menu rows, states, and detail values
 - Numbered index column, entity name, live state on the right
 - Dynamic number of pages, eight entities per page
 - Configurable page titles, default `PAGE1`, `PAGE2`, ...
@@ -12,9 +12,9 @@ A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 - Control over the Home Assistant REST API
 - Configuration stored in NVS
 - Web configuration with an entity selector loaded from Home Assistant
-- Display brightness setting plus day/night backlight schedule
+- Normal/dim/off display states with day/night schedules and web previews
 - M5Code arrow/select sound effects through the built-in speaker
-- Partial refresh only
+- Value-area refreshes leave unchanged labels and rows untouched
 - No boot/setup screen: the menu is shown immediately
 
 ## Layout
@@ -29,8 +29,8 @@ A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 | 4 | TV                     PLAYING    |
 | 5 | Movie night            SCENE      |
 | 6 | Indoor temperature     23.4C      |
-| 7 | EMPTY                             |
-| 8 | EMPTY                             |
+| 7 |                                   |
+| 8 |                                   |
 +--------------------------------------+
 ```
 
@@ -55,7 +55,9 @@ A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 - Right: combined Wi-Fi / HA link icon, then the battery icon
 - Wi-Fi is not configured: dim signal icon, blinking
 - While connecting, retrying, or disconnected: the signal icon blinks; no red X
-- Charging: neutral grey bolt in the battery icon, no bright fill
+- Confirmed Core USB charging: bolt inside the battery icon
+- Assumed dock/external power: plug overlay; charging/full status remains unknown
+- Unavailable battery reading: `?` until the dock hint activates
 - No clock, no battery percentage
 - The battery icon is monochrome, same color as the signal bars
 
@@ -73,8 +75,10 @@ of pages, including empty pages.
 
 Page switching:
 
-- Long press **A** / **C** while the menu is visible
+- Grid **r1c2 (M)** / **r1c3 (%)** while the menu is visible; wraps at either end
 - Serial `p` / `n`
+
+The Core's **A/C** buttons move the cursor within the current page.
 
 ## Battery and power
 
@@ -96,6 +100,7 @@ PMIC samples show a plug over the battery: assumed dock/external power, with
 charging status unknown. A responding PMIC clears this hint immediately.
 This user-selected heuristic can also trigger on an I2C fault. Before it activates,
 an unavailable battery reading shows `?`, never an empty battery.
+Power is sampled every 500 ms, so the hint takes roughly 1–1.5 seconds to activate.
 
 The Bottom3 has its own TP4057 charger and a separate battery power switch.
 The Core's IP5306 readings do not directly report the TP4057 charging state.
@@ -110,7 +115,7 @@ The keypad shares M5Unified's I2C driver with the PMIC. `/diag` includes the bus
 pins and IP5306 registers `00`, `01`, `70`, `71`, and `78` for power troubleshooting.
 It also reports the current page and focus. It does not read the ESP32 Hall
 sensor: `hallRead()` changes GPIO39 (Button A) into analog mode and can cause a
-phantom long press that navigates to the previous page.
+phantom button press.
 
 Espressif withdrew the built-in Hall sensor as a supported feature because it
 does not work properly; see
@@ -148,7 +153,8 @@ so actual dock charging detection requires a hardware status connection.
 
 ## Backlight schedule
 
-Configured in the web page under **Display**.
+Configured in the web page under **Display**. Times use UTC+8 (`CST-8`),
+synchronized over NTP after Wi-Fi connects.
 
 - `day`: 07:00-21:00, brightness 5%, automatic dim/off disabled by default
 - `night`: 21:00-07:00, brightness 5%; after 10 minutes idle, dim at 1% for
@@ -158,20 +164,28 @@ Configured in the web page under **Display**.
 - Dim mode uses a black background, faint grey text, and subdued selection,
   numbers, status icons, and editing colors regardless of the chosen normal theme
 - `0` disables a timeout. If dimming is disabled, the off timeout starts at last input
-- Any button or serial key restores the normal theme/brightness and resets idle time
+- Any device button or serial navigation key restores the normal theme/brightness
+  and resets idle time
+- From dim, a key restores the normal view and performs its action. From off,
+  the first press only wakes the display; the next press performs its action.
+  A held A/B/C wake press stays suppressed until release, including B's long press
+- Background updates, schedule changes, and clock recovery cannot wake or
+  brighten a dim/off screen
 - Web **Wake**, **Dim**, and **Off** buttons preview the live display using saved
-  brightness settings without saving. Any input or the next schedule period clears
-  the preview. Wake returns to the normal view
+  brightness settings without saving. Device input clears the preview; Wake returns
+  to the normal view
 - Older custom nonzero off timeouts keep their direct-to-off behavior; an old
   disabled night timeout adopts the new 10-minute/2-minute defaults
 
 The fallback brightness is used until network time is available.
+Once dim/off, loss or recovery of network time does not brighten the display.
 
 ## Sound
 
 Menu movement plays `sfx_arrow`; actions play `sfx_select`. Both are the
 original M5Code WAV effects played through the built-in Core speaker via
 `M5.Speaker`.
+Docking and undocking are silent.
 
 ## Home Assistant setup
 
@@ -193,8 +207,9 @@ The entity list is cached for 60 seconds.
 
 ## Web configuration
 
-- First boot / no Wi-Fi: open AP `HA-Remote`, then `http://192.168.4.1`
+- No saved Wi-Fi SSID: open AP `HA-Remote`, then `http://192.168.4.1`
 - Normal operation: `http://<device-ip>/` or `http://ha-remote.local/`
+- With saved Wi-Fi credentials, the device keeps retrying a lost connection
 
 Fields:
 
@@ -212,6 +227,24 @@ Fields:
 The page is plain: square inputs and buttons, no rounded corners. Empty slots
 and empty pages are kept as configured.
 After saving, the page waits for the device to restart and reloads automatically.
+If reconnection times out, it reports the problem and enables Save again.
+
+### Web endpoints
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /` | Configuration form |
+| `POST /save` | Save settings and reboot; the web form reconnects automatically |
+| `POST /display` | Preview the display with form field `mode=wake`, `dim`, or `off`; settings are not saved |
+| `GET /power` | Current battery and Core charger readings |
+| `GET /diag` | Menu, backlight, LED, and power diagnostics; reading it does not wake the display |
+| `GET /update` | Firmware upload form; requires the firmware username/password |
+| `POST /update?size=<bytes>` | Authenticated firmware upload using multipart field `firmware` |
+
+Backlight diagnostics include `backlight=normal|dim|off`, `backlight_pwm` (0–255),
+`dim_theme` (0/1), and `display_override` (-1 for automatic, 1 for Dim preview,
+2 for Off preview). **Wake** and physical input clear the override. Automatic
+updates may dim or turn off the screen, but cannot wake or brighten it.
 
 ## Serial configuration
 
@@ -239,8 +272,8 @@ After saving, the page waits for the device to restart and reloads automatically
 | A / C | cursor up / down (wraps within the page, skips empty slots) |
 | B short press | toggle the focused entity / cycle AC mode; activate the focused AC detail control |
 | B long press | open AC detail from the menu / return to the menu from AC detail |
-| 1-8 | direct hotkey for the current page |
-| FACES keypad 1-8 | direct hotkey for the current page |
+| 1-8 in the main menu | select and run that slot on the current page |
+| FACES keypad 1-7 in AC detail | focus that control; B or r5c4 activates/confirms it |
 | FACES keypad r1c1 (AC) | back to main menu; discards an unconfirmed temperature edit |
 | FACES keypad r1c2 (M) / r1c3 (%) | previous / next page (wraps at either end; main menu only) |
 | FACES keypad 0 | back / cancel temperature edit |
@@ -248,6 +281,9 @@ After saving, the page waits for the device to restart and reloads automatically
 | Select an AC item | cycle OFF and its allowed, HA-supported modes |
 
 Only AC items have a detail panel. Sensors remain read-only in the main menu.
+These actions apply when the display is normal or dim. When it is off, the
+first key press only wakes it, including a held B press; release and press again
+to perform an action. Web **Wake** changes only the display state.
 
 ## AC detail
 
@@ -287,7 +323,8 @@ Value refreshes in the menu and AC panel redraw only changed text bounds;
 unchanged values are skipped. Shorter values clear their previous width so no
 old characters remain. Labels redraw only when their text, color, or truncation
 changes. Selection, edit highlighting, and page changes redraw the affected rows.
-The full screen is painted once at boot.
+The full screen redraws at boot and when entering/leaving the dim palette.
+Ordinary value refreshes do not clear the entire row or screen.
 
 ## Home Assistant API
 
@@ -296,8 +333,8 @@ The full screen is painted once at boot.
 - REST service calls for control
 - WebSocket `ws://<host>:8123/api/websocket` for `state_changed`
 - Initial resync after WebSocket authentication and every five minutes
-- Only the current page is polled; all configured entities receive WebSocket
-  updates
+- REST resync fetches all configured entities and climate AUX entities; only
+  visible rows redraw. All configured entities receive WebSocket updates
 
 ## Build and flash
 
