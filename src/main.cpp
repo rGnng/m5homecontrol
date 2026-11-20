@@ -217,10 +217,10 @@ static void setUiFont(LovyanGFX& g, uint8_t size) {
         g.setTextFont(1);
         g.setTextSize(1);
     } else if (size == 2) {
-        g.setFont(&lgfx::fonts::FreeSansBold12pt7b);
+        g.setFont(&lgfx::fonts::FreeSans12pt7b);
         g.setTextSize(1);
     } else {
-        g.setFont(&lgfx::fonts::FreeSansBold18pt7b);
+        g.setFont(&lgfx::fonts::FreeSans18pt7b);
         g.setTextSize(1);
     }
 }

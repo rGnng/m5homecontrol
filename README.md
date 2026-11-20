@@ -4,7 +4,7 @@ A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 
 - M5Code-style menu: eight rows per page
 - Two themes: `Flipper` (default) and `Classic`
-- Bold proportional font for menu rows, states, and detail values
+- Proportional sans font for menu rows, states, and detail values
 - Numbered index column, entity name, live state on the right
 - Dynamic number of pages, eight entities per page
 - Configurable page titles, default `PAGE1`, `PAGE2`, ...
