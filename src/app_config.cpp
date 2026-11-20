@@ -333,6 +333,7 @@ static void handleRoot() {
     page += "</select>";
     page += "<label>Fallback brightness (%)</label><input name=\"bright\" type=\"number\" min=\"1\" max=\"100\" value=\"" +
             String(g_config.brightness) + "\">";
+    page += "<button type=\"button\" class=\"secondary\" onclick=\"fetch('/leds')\">Test side LEDs (2 s)</button>";
     page += "<div class=\"pagehead\">Backlight Schedule</div>";
     page += "<table><tbody>";
     page += "<tr><th></th><th>Start</th><th>End</th><th>Brightness %</th><th>Off after (s)</th></tr>";
@@ -724,6 +725,26 @@ static void startWebServer() {
     if (!g_routesReady) {
         server.on("/", HTTP_GET, handleRoot);
         server.on("/save", HTTP_POST, handleSave);
+        server.on("/leds", HTTP_GET, []() {
+            sideLedsPreview();
+            server.send(200, "text/plain", "ok");
+        });
+        server.on("/diag", HTTP_GET, []() {
+            String text = "board=" + String((int)M5.getBoard());
+            text += " leds=" + String((unsigned)M5.Led.getCount());
+            text += " led_type=" + String((int)M5.Led.getLedType(0));
+            text += " charging=" + String((int)M5.Power.isCharging());
+            text += " vbus=" + String(M5.Power.getVBUSVoltage());
+            text += " battery=" + String(M5.Power.getBatteryLevel());
+            text += " hall=" + String(hallRead());
+            uint8_t reg70 = 0;
+            if (M5.Power.Ip5306.readRegister(0x70, &reg70, 1)) {
+                text += " ip5306_70=" + String(reg70);
+            } else {
+                text += " ip5306_70=na";
+            }
+            server.send(200, "text/plain", text);
+        });
         server.onNotFound([]() {
             server.sendHeader("Location", "/");
             server.send(302, "text/plain", "");

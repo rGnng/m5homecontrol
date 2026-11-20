@@ -11,6 +11,8 @@
 #include <math.h>
 #include <esp_heap_caps.h>
 
+#include <utility/led/LED_Strip_Class.hpp>
+
 #include "app_config.h"
 #include "ha_client.h"
 #include "sfx_data.h"
@@ -193,6 +195,128 @@ static char keypadPoll() {
     g_lastKeyTime = now;
     Serial.printf("[keypad] 0x%02X '%c'\n", raw, c);
     return c;
+}
+
+// ---------------------------------------------------------------------
+//  Faces Bottom3 side LEDs (10 x SK6812, 5 on each side)
+// ---------------------------------------------------------------------
+static constexpr int SIDE_LED_COUNT = 10;
+static bool g_sideLedsReady = false;
+static bool g_sideLedTimer = false;
+static uint32_t g_sideLedOffAt = 0;
+static uint32_t g_lastDockPoll = 0;
+static bool g_dockPrev = false;
+
+static void sideLedsInit() {
+    auto board = M5.getBoard();
+    if (board != m5::board_t::board_M5Stack &&
+        board != m5::board_t::board_M5StackCore2) {
+        return;
+    }
+
+    auto* strip = static_cast<m5::LED_Strip_Class*>(M5.Led.getLedInstancePtr());
+    if (!strip) return;
+
+    auto cfg = strip->getConfig();
+    cfg.led_count = SIDE_LED_COUNT;
+    strip->setConfig(cfg);
+
+    M5.Led.setBrightness(64);
+    M5.Led.setAllColor(0, 0, 0);
+    M5.Led.display();
+    g_sideLedsReady = true;
+
+    Serial.printf("[led] side LEDs=%u pin=%d\n", (unsigned)M5.Led.getCount(),
+                  (int)M5.getPin(m5::pin_name_t::rgb_led));
+}
+
+static bool dockPowerPresent() {
+    if (M5.getBoard() == m5::board_t::board_M5Stack) {
+        uint8_t value = 0;
+        if (M5.Power.Ip5306.readRegister(0x70, &value, 1)) {
+            return (value & 0x08) != 0;
+        }
+    }
+
+    int16_t vbus = M5.Power.getVBUSVoltage();
+    if (vbus > 4000) return true;
+
+    return M5.Power.isCharging() == m5::Power_Class::is_charging;
+}
+
+static void sideLedsShowBattery() {
+    if (!g_sideLedsReady) return;
+
+    int count = (int)M5.Led.getCount();
+    if (count <= 0) return;
+
+    int level = M5.Power.getBatteryLevel();
+    if (level < 0) level = 0;
+    if (level > 100) level = 100;
+
+    uint8_t r, g, b;
+    if (level > 60) {
+        r = 0; g = 255; b = 0;
+    } else if (level > 25) {
+        r = 255; g = 120; b = 0;
+    } else {
+        r = 255; g = 0; b = 0;
+    }
+
+    M5.Led.setAllColor(0, 0, 0);
+
+    if (count < 4) {
+        for (int i = 0; i < count; i++) {
+            M5.Led.setColor(i, r, g, b);
+        }
+    } else {
+        int half = count / 2;
+        int lit = (level * half + 99) / 100;
+        if (lit < 1) lit = 1;
+        for (int i = 0; i < half; i++) {
+            bool on = i < lit;
+            uint8_t rr = on ? r : 0;
+            uint8_t gg = on ? g : 0;
+            uint8_t bb = on ? b : 0;
+            M5.Led.setColor(i, rr, gg, bb);
+            M5.Led.setColor(half + i, rr, gg, bb);
+        }
+    }
+
+    M5.Led.display();
+}
+
+void sideLedsPreview() {
+    sideLedsShowBattery();
+    g_sideLedTimer = true;
+    g_sideLedOffAt = millis() + 2000;
+}
+
+static void sideLedsOff() {
+    if (!g_sideLedsReady) return;
+    M5.Led.setAllColor(0, 0, 0);
+    M5.Led.display();
+}
+
+static void sideLedsLoop() {
+    uint32_t now = millis();
+
+    // The Faces Charging3 only exposes BAT/GND on its pogo pins, so use the
+    // PMIC charge flag and VBUS (where available) as the dock signal.
+    if (now - g_lastDockPoll >= 500) {
+        g_lastDockPoll = now;
+        bool dock = dockPowerPresent();
+        if (dock && !g_dockPrev) {
+            Serial.println("[led] charging dock detected");
+            sideLedsPreview();
+        }
+        g_dockPrev = dock;
+    }
+
+    if (g_sideLedTimer && (int32_t)(now - g_sideLedOffAt) >= 0) {
+        sideLedsOff();
+        g_sideLedTimer = false;
+    }
 }
 
 static void sfxArrow() {
@@ -1793,6 +1917,7 @@ void setup() {
     M5.begin(cfg);
     M5.Speaker.setVolume(96);
     keypadInit();
+    sideLedsInit();
 
     g_lastBatteryPct = M5.Power.getBatteryLevel();
     g_lastCharging = M5.Power.isCharging();
@@ -1843,6 +1968,7 @@ void setup() {
 
 void loop() {
     M5.update();
+    sideLedsLoop();
     if (M5.BtnA.isPressed() || M5.BtnB.isPressed() || M5.BtnC.isPressed()) {
         noteActivity();
     }

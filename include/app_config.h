@@ -52,4 +52,7 @@ void networkLoop();
 bool configModeActive();
 String networkIp();
 
+// Show the battery level on the Faces Bottom3 side LEDs for two seconds.
+void sideLedsPreview();
+
 void appConfigHandleCommand(const String& line);

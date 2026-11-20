@@ -76,6 +76,21 @@ Page switching:
 - Long press **A** / **C** while the menu is visible
 - Serial `p` / `n`
 
+## Faces Bottom3 side LEDs
+
+The Faces Bottom3 has ten SK6812 LEDs, five on each side. The firmware drives
+them as a battery gauge:
+
+- When charging is detected, both sides show the battery level for two seconds
+- Five LEDs per side; the bar grows with the battery percentage
+- Green above 60%, amber above 25%, red below
+- The LEDs turn off after two seconds
+- Set the Bottom3 **LED IO** switch to `G15` when using a Core Basic
+- Web -> Display -> **Test side LEDs** shows the gauge for two seconds
+
+The Faces Charging3 pogo pins only carry `BAT` and `GND`, so the Core has no
+separate dock-detect line. Charging detection uses the PMIC charge flag.
+
 ## Backlight schedule
 
 Configured in the web page under **Display**.
