@@ -8,6 +8,7 @@
 #include <Update.h>
 
 #include "ha_client.h"
+#include "html_stream.h"
 #include "power_status.h"
 
 static const char* NVS_NAMESPACE = "haremote";
@@ -338,8 +339,11 @@ static void handleRoot() {
         optionsLoaded = !cachedOptions.isEmpty();
     }
 
-    String page = htmlHeader("HA Remote Setup");
-    page.reserve(40000 + cachedOptions.length());
+    server.sendHeader("Cache-Control", "no-store");
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    server.send(200, "text/html", "");
+    HtmlStream<WebServer> page(server, haLoop);
+    page += htmlHeader("HA Remote Setup");
 
     String wifiLabel = g_config.ssid.isEmpty()
                            ? String("not configured")
@@ -535,10 +539,14 @@ static void handleRoot() {
     page += "<button type=\"submit\">Save and reboot</button>";
     page += "</div></div>";
 
-    page += String(R"JS(
+    page += R"JS(
 <script>
-const MAX_PAGES = )JS") + String(MAX_PAGES) + R"JS(;
-const SLOTS = )JS" + String(GRID_SLOTS) + R"JS(;
+const MAX_PAGES = )JS";
+    page += String(MAX_PAGES);
+    page += R"JS(;
+const SLOTS = )JS";
+    page += String(GRID_SLOTS);
+    page += R"JS(;
 function updateModesRow(row) {
   const entity = row.querySelector('.entity').value.trim();
   const climate = entity.toLowerCase().startsWith('climate.');
@@ -717,8 +725,7 @@ document.querySelector('form[action="/save"]').addEventListener('submit', functi
     page += "<p style=\"margin-top:24px;color:#777\">Serial console: send <code>:help</code> at 115200 baud.</p>";
     page += htmlFooter();
 
-    server.sendHeader("Cache-Control", "no-store");
-    server.send(200, "text/html", page);
+    page.finish();
 }
 
 static void sendSaveError(const String& message) {

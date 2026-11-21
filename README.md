@@ -16,6 +16,8 @@ A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 - Control over the Home Assistant REST API
 - Configuration stored in NVS
 - Web configuration with an entity selector loaded from Home Assistant
+- Configuration HTML streams in small chunks, including the control script,
+  without allocating the entire page in RAM
 - Normal/dim/off display states with day/night schedules and web previews
 - M5Code arrow/select sound effects through the built-in speaker
 - Value-area refreshes leave unchanged labels and rows untouched
@@ -509,4 +511,5 @@ g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
 /tmp/m5-ha-clock-test
 python3 tools/test_ha_clock_ws.py
 python3 tools/test_ha_http_worker.py
+python3 tools/test_web_config.py
 ```
