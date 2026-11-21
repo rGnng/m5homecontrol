@@ -254,7 +254,7 @@ static String htmlHeader(const String& title) {
     h += "h1{color:#fff;font-size:22px;margin:0 0 12px}p{color:#999;line-height:1.4}";
     h += ".layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.35fr);gap:24px;align-items:start}";
     h += ".col{min-width:0}";
-    h += "fieldset{border:1px solid #333;margin:0 0 18px;padding:12px 14px;background:#080808}";
+    h += "fieldset{min-width:0;border:1px solid #333;margin:0 0 18px;padding:12px 14px;background:#080808}";
     h += "legend{font-weight:600;padding:0 4px;color:#fff}label{display:block;margin:10px 0 4px;font-size:14px;color:#bbb}";
     h += "input{width:100%;box-sizing:border-box;padding:8px;border:1px solid #444;border-radius:0;font:inherit;background:#111;color:#eee}";
     h += "input:focus{outline:none;border-color:#aaa}";
@@ -274,6 +274,11 @@ static String htmlHeader(const String& title) {
     h += "label.inline{display:inline-flex;align-items:center;gap:4px;margin:0 10px 0 0;font-size:12px;color:#aaa}";
     h += "label.inline input{width:auto;margin:0}";
     h += ".pagehead{font-weight:600;margin:18px 0 6px;color:#fff}";
+    h += ".pagebar{display:flex;align-items:center;gap:6px;margin:18px 0 6px}";
+    h += ".page-number{min-width:2ch;text-align:right;color:#888;font-size:14px}";
+    h += ".pagebar .ptitle{flex:1;min-width:0;width:0}";
+    h += ".pagebar button{margin:0;flex-shrink:0;padding:8px 10px}";
+    h += "button:disabled{opacity:.35;cursor:default}";
     h += ".status{border-left:3px solid #eee;padding:8px 10px;background:#111;margin:0 0 14px;color:#bbb}";
     h += ".actions{display:flex;align-items:center;gap:12px;margin:8px 0 24px}";
     h += ".actions button{width:auto;padding:7px 14px;margin:0}";
@@ -409,18 +414,14 @@ static void handleRoot() {
     scheduleRow("night", "n", g_config.nightStart, g_config.nightEnd, g_config.nightBrightness,
                 g_config.nightDimBrightness, g_config.nightDimSeconds, g_config.nightOffSeconds);
     page += "</tbody></table></div>";
-    page += "<p>After the dim timeout, use a black background with faint text at Dim brightness. "
-            "The off timeout starts when dimming begins. With dim disabled (0), it starts from the last input. "
-            "0 disables each timeout. Any input wakes the screen. "
-            "Night defaults: dim after 10 minutes, then off 2 minutes later.</p>";
-    page += "<p>Schedule time comes from Home Assistant. Local time: " +
-            htmlEscape(haLocalTimeText()) + "; time zone: " + htmlEscape(haTimeZone()) + ".</p>";
+    page += "<p>0 = disabled. Without dimming, Off counts from last input.</p>";
+    page += "<p>HA timezone: " + htmlEscape(haTimeZone()) +
+            "<br>HA time: " + htmlEscape(haLocalTimeText()) + "</p>";
     page += "<div class=\"pagehead\">Preview display</div>";
     page += "<div class=\"actions\"><button type=\"button\" onclick=\"previewDisplay('wake')\">Wake</button>"
             "<button type=\"button\" onclick=\"previewDisplay('dim')\">Dim</button>"
             "<button type=\"button\" onclick=\"previewDisplay('off')\">Off</button></div>";
-    page += "<p id=\"display-status\" role=\"status\">Preview uses the saved brightness settings. "
-            "Any device input or Wake restores the normal view.</p>";
+    page += "<p id=\"display-status\" role=\"status\">Uses saved settings. Input or Wake restores the display.</p>";
     page += "</fieldset>";
 
     page += "</div>";
@@ -443,10 +444,12 @@ static void handleRoot() {
     page += "<div id=\"pages\">";
     for (int p = 0; p < g_config.pageCount; p++) {
         page += "<div class=\"pageblock\">";
-        page += "<div class=\"pagehead\"><span>Page " + String(p + 1) +
-                "</span> <button type=\"button\" class=\"remove\" onclick=\"removePage(this)\">Remove page</button></div>";
-        page += "<label>Title</label><input class=\"ptitle\" name=\"t" + String(p) +
+        page += "<div class=\"pagebar\"><span class=\"page-number\" aria-label=\"Page number\">" + String(p + 1) +
+                "</span><input class=\"ptitle\" aria-label=\"Page title\" placeholder=\"Page title\" name=\"t" + String(p) +
                 "\" value=\"" + htmlEscape(g_config.pageTitles[p]) + "\">";
+        page += "<button type=\"button\" class=\"move-up\" aria-label=\"Move page up\" title=\"Move page up\" onclick=\"movePage(this,-1)\">&uarr;</button>"
+                "<button type=\"button\" class=\"move-down\" aria-label=\"Move page down\" title=\"Move page down\" onclick=\"movePage(this,1)\">&darr;</button>"
+                "<button type=\"button\" class=\"remove\" onclick=\"removePage(this)\">Remove</button></div>";
         page += "<table><tbody>";
         page += "<tr><th></th><th>Entity ID</th><th>Display name</th></tr>";
         for (int slot = 0; slot < GRID_SLOTS; slot++) {
@@ -560,7 +563,10 @@ function bindRows() {
 function renumberPages() {
   const blocks = document.querySelectorAll('#pages .pageblock');
   blocks.forEach(function(block, p) {
-    block.querySelector('.pagehead span').textContent = 'Page ' + (p + 1);
+    block.querySelector('.page-number').textContent = p + 1;
+    block.querySelector('.move-up').disabled = p === 0;
+    block.querySelector('.move-down').disabled = p === blocks.length - 1;
+    block.querySelector('.remove').disabled = blocks.length <= 1;
     block.querySelector('.ptitle').name = 't' + p;
     block.querySelectorAll('.slotrow').forEach(function(row, slot) {
       const idx = p * SLOTS + slot;
@@ -601,10 +607,21 @@ function addPage() {
   }
   const block = document.createElement('div');
   block.className = 'pageblock';
-  block.innerHTML = '<div class="pagehead"><span></span> <button type="button" class="remove" onclick="removePage(this)">Remove page</button></div>' +
-    '<label>Title</label><input class="ptitle" value="PAGE' + (blocks.length + 1) + '">' +
+  block.innerHTML = '<div class="pagebar"><span class="page-number" aria-label="Page number"></span>' +
+    '<input class="ptitle" aria-label="Page title" placeholder="Page title" value="PAGE' + (blocks.length + 1) + '">' +
+    '<button type="button" class="move-up" aria-label="Move page up" title="Move page up" onclick="movePage(this,-1)">&uarr;</button>' +
+    '<button type="button" class="move-down" aria-label="Move page down" title="Move page down" onclick="movePage(this,1)">&darr;</button>' +
+    '<button type="button" class="remove" onclick="removePage(this)">Remove</button></div>' +
     '<table><tbody><tr><th></th><th>Entity ID</th><th>Display name</th></tr>' + rows + '</tbody></table>';
   document.getElementById('pages').appendChild(block);
+  renumberPages();
+}
+function movePage(button, direction) {
+  const block = button.closest('.pageblock');
+  const sibling = direction < 0 ? block.previousElementSibling : block.nextElementSibling;
+  if (!sibling) return;
+  if (direction < 0) block.parentNode.insertBefore(block, sibling);
+  else block.parentNode.insertBefore(sibling, block);
   renumberPages();
 }
 function removePage(button) {
@@ -1044,9 +1061,11 @@ static void startWebServer() {
         server.on("/diag", HTTP_GET, []() {
             PowerStatus power = readPowerStatus();
             String text = "board=" + String((int)M5.getBoard());
+            text += " uptime_ms=" + String(millis());
             text += " " + menuStatus();
             text += " " + backlightStatus();
             text += " " + haClockStatus();
+            text += " " + haConnectionStatus();
             text += " " + commandLedsStatus();
             text += " charging=" + String(chargeStateName(power.charging));
             text += " core_charging=" + String(chargeStateName(power.coreCharging));

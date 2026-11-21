@@ -174,7 +174,6 @@ static EntityState& cardAt(int slot) {
 }
 
 static int g_refreshIndex = -1;
-static int g_refreshOk = 0;
 static int g_refreshFail = 0;
 static uint32_t g_nextRefresh = 0;
 static wl_status_t g_prevWifiLink = WL_IDLE_STATUS;
@@ -1237,13 +1236,10 @@ static void onHaState(const EntityState& state) {
             if (i / GRID_SLOTS == g_page || (g_detail && i == g_detailGlobal)) {
                 g_dirty[i] = true;
             }
-            if (!g_haOnline) {
-                g_haOnline = true;
-                g_statusLinkDirty = true;
-            }
             return;
         }
         if (!card.aux.id.isEmpty() && card.aux.id == state.id) {
+            card.aux.revision = state.revision;
             card.aux.name = state.name;
             card.aux.state = state.state;
             card.aux.unit = state.unit;
@@ -1255,10 +1251,6 @@ static void onHaState(const EntityState& state) {
             card.aux.brightnessAdjustable = state.brightnessAdjustable;
             if (i / GRID_SLOTS == g_page || (g_detail && i == g_detailGlobal)) {
                 g_dirty[i] = true;
-            }
-            if (!g_haOnline) {
-                g_haOnline = true;
-                g_statusLinkDirty = true;
             }
             return;
         }
@@ -1275,7 +1267,6 @@ static void onHaStatus(bool online) {
 static void onHaAuth() {
     // Re-sync through REST after a successful WebSocket subscription.
     g_refreshIndex = -1;
-    g_refreshOk = 0;
     g_nextRefresh = 0;
 }
 
@@ -1345,12 +1336,7 @@ static EntityState& selectedEntity() {
 
 static bool callService(const String& domain, const String& service,
                         const String& entityId, const String& extra = "") {
-    bool ok = haCallService(domain, service, entityId, extra);
-    if (g_haOnline != ok) {
-        g_haOnline = ok;
-        g_statusLinkDirty = true;
-    }
-    return ok;
+    return haCallService(domain, service, entityId, extra);
 }
 
 static void acMove(int delta) {
@@ -1818,23 +1804,15 @@ static void refreshTick() {
     if (g_refreshIndex < 0) {
         if ((int32_t)(millis() - g_nextRefresh) < 0) return;
         g_refreshIndex = 0;
-        g_refreshOk = 0;
         g_refreshFail = 0;
     }
 
     if (g_refreshIndex >= g_config.entityCount) {
-        bool anyOk = (g_refreshOk > 0);
         bool anyFail = (g_refreshFail > 0);
         g_refreshIndex = -1;
-        g_refreshOk = 0;
         g_refreshFail = 0;
         // Retry failed servers quickly, but do not hammer a healthy one.
         g_nextRefresh = millis() + (anyFail ? 15000 : 300000);
-        bool online = anyOk || haWsConnected();
-        if (g_haOnline != online) {
-            g_haOnline = online;
-            g_statusLinkDirty = true;
-        }
         return;
     }
 
@@ -1842,18 +1820,14 @@ static void refreshTick() {
     if (index < g_config.entityCount && !g_cards[index].id.isEmpty()) {
         bool ok = haFetchState(g_cards[index]);
         if (ok) {
-            g_refreshOk++;
-            if (!g_haOnline) {
-                g_haOnline = true;
-                g_statusLinkDirty = true;
-            }
             if (!g_cards[index].customName.isEmpty()) {
                 g_cards[index].name = g_cards[index].customName;
             }
             if (!g_cards[index].aux.id.isEmpty()) {
+                uint32_t revision = g_cards[index].aux.revision;
                 EntityState auxState;
                 auxState.id = g_cards[index].aux.id;
-                if (haFetchState(auxState)) {
+                if (haFetchState(auxState) && g_cards[index].aux.revision == revision) {
                     g_cards[index].aux.name = auxState.name;
                     g_cards[index].aux.state = auxState.state;
                     g_cards[index].aux.unit = auxState.unit;
@@ -1875,14 +1849,8 @@ static void refreshTick() {
             // UI for every entity. It will retry forever every 15 seconds.
             if (g_refreshFail >= 3) {
                 g_refreshIndex = -1;
-                g_refreshOk = 0;
                 g_refreshFail = 0;
                 g_nextRefresh = millis() + 15000;
-                bool online = haWsConnected();
-                if (g_haOnline != online) {
-                    g_haOnline = online;
-                    g_statusLinkDirty = true;
-                }
             }
         }
     }

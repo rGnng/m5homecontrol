@@ -29,6 +29,9 @@ static int64_t esp_timer_get_time(){return nowMs*1000;}
 struct {template<class... T>void printf(const char*,T...){} void println(const char*){}} Serial;
 static std::vector<std::string> sent;
 struct {void loop(){} void disconnect(){} } ws;
+enum WStype_t {WStype_CONNECTED,WStype_DISCONNECTED,WStype_TEXT,WStype_ERROR};
+static constexpr int WL_CONNECTED=3;
+struct {int status(){return WL_CONNECTED;}} WiFi;
 static bool g_wsStarted=true,g_wsAuthed=false;
 static uint32_t g_wsMessageId=1,g_wsClockId=0,g_clockRetryAt=0;
 static HaClock g_haClock;
@@ -38,13 +41,16 @@ static int stateEvents=0;
 static void onState(const EntityState&){++stateEvents;}
 static HaStateCallback g_stateCb=onState;
 struct {String haToken="fake-host-test-token";}g_config;
-static void notifyStatus(bool){}
+static bool lastOnline=false;
+static void notifyStatus(bool online){lastOnline=online;}
 static bool parseState(EntityState&,JsonVariantConst){return true;}
 static void wsSendJson(JsonDocument& doc){std::string out;serializeJson(doc,out);sent.push_back(out);}
 '''
 signatures=['static uint64_t clockMillis(', 'bool haGetLocalTime(', 'String haTimeZone(',
-            'String haLocalTimeText(', 'String haClockStatus(', 'static void wsSubscribeClock(',
-            'static bool syncClock(', 'static void wsSubscribe(', 'static void wsHandleText(', 'void haLoop(']
+            'String haLocalTimeText(', 'String haClockStatus(', 'String haConnectionStatus(', 'static void wsSubscribeClock(',
+            'static bool syncClock(', 'static void wsSubscribe(', 'static void wsHandleText(', 'static void wsEvent(',
+            'void haLoop(', 'bool haWsConnected(']
+stats=source[source.index('struct HaLinkStats {'):source.index('static uint64_t clockMillis(')]
 tests=r'''
 static void message(const std::string& json){wsHandleText(reinterpret_cast<const uint8_t*>(json.data()),json.size());}
 static void clockEvent(uint32_t id,int64_t epoch,int offset,const char* zone,bool encoded=false){
@@ -56,10 +62,13 @@ static void clockEvent(uint32_t id,int64_t epoch,int offset,const char* zone,boo
 }
 int main(){
     assert(!g_haClock.ready() && haLocalTimeText()=="Unavailable");
+    wsEvent(WStype_CONNECTED,nullptr,0);
+    assert(g_linkStats.connections==1 && g_linkStats.lastConnectMs==1000 && !lastOnline);
     message(R"({"type":"auth_required"})");
     JsonDocument request;assert(!deserializeJson(request,sent.back()));assert(request["type"]=="auth");
     message(R"({"type":"auth_ok"})");
     assert(g_wsAuthed && sent.size()==3 && g_wsClockId!=0);
+    assert(lastOnline && g_linkStats.authentications==1 && g_linkStats.lastAuthMs==1000);
     assert(!deserializeJson(request,sent.back()));assert(request["type"]=="render_template");
     assert(request["template"].as<std::string>().find("now()")!=std::string::npos);
     uint32_t subscription=g_wsClockId;
@@ -90,11 +99,25 @@ int main(){
     subscription=g_wsClockId;message(R"({"type":"auth_ok"})");assert(g_wsClockId!=subscription);
     assert(g_haClock.ready());clockEvent(g_wsClockId,1767225840,0,"UTC");
     assert(haTimeZone()=="UTC" && haLocalTimeText()=="2026-01-01T00:04:00");
+    nowMs+=500;
+    wsEvent(WStype_ERROR,nullptr,0);assert(g_linkStats.errors==1);
+    String disconnectedAt=haLocalTimeText();
+    wsEvent(WStype_DISCONNECTED,nullptr,0);
+    assert(!lastOnline && !haWsConnected() && g_wsClockId==0);
+    assert(g_linkStats.disconnects==1 && g_linkStats.lastDisconnectMs==nowMs);
+    assert(g_linkStats.lastDisconnectTime==disconnectedAt);
+    status=haConnectionStatus();
+    assert(status.find("wifi_connected=1 ws_connected=0")!=std::string::npos);
+    assert(status.find("ws_disconnects=1")!=std::string::npos);
+    wsEvent(WStype_CONNECTED,nullptr,0);message(R"({"type":"auth_ok"})");
+    assert(lastOnline && haWsConnected() && g_linkStats.connections==2);
+    assert(g_linkStats.authentications==3 && g_linkStats.disconnects==1);
+    haLoop();nowMs+=25;haLoop();assert(g_linkStats.maxLoopGapMs>=25);
     std::puts("PASS: actual HA clock subscription, object/text updates, local time/zone diagnostics, invalid/stale IDs, state events, retries and reconnects");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='m5-clock-ws-') as directory:
     tmp=Path(directory);(tmp/'Arduino.h').write_text(arduino)
-    (tmp/'test.cpp').write_text(prefix+''.join(function(s) for s in signatures)+tests)
+    (tmp/'test.cpp').write_text(prefix+stats+''.join(function(s) for s in signatures)+tests)
     subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror',f'-I{tmp}',f'-I{ROOT/"include"}',f'-I{ROOT/".pio/libdeps/m5stack-core/ArduinoJson/src"}',str(tmp/'test.cpp'),'-o',str(tmp/'test')],check=True)
     subprocess.run([str(tmp/'test')],check=True)

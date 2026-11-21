@@ -65,6 +65,8 @@ A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 - Right: combined Wi-Fi / HA link icon, then the battery icon
 - Wi-Fi is not configured: dim signal icon, blinking
 - While connecting, retrying, or disconnected: the signal icon blinks; no red X
+- The icon follows Wi-Fi and the authenticated HA WebSocket; a failed entity
+  command does not change connection status
 - Confirmed Core USB charging: bolt inside the battery icon
 - Assumed dock/external power: plug overlay; charging/full status remains unknown
 - Unavailable battery reading: `?` until the dock hint activates
@@ -74,7 +76,8 @@ A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 ## Dynamic pages and titles
 
 Pages are explicitly configured in the web UI. Use **Add page** and
-**Remove page** in the backend; the device shows exactly the configured number
+**Remove** in the backend; use **↑ / ↓** beside each editable title to reorder
+whole pages, then **Save and reboot**. The device shows exactly the configured number
 of pages, including empty pages.
 
 - Eight slots per page
@@ -277,6 +280,19 @@ Clock diagnostics include `time_source=ha|unavailable`, `ha_timezone`,
 `utc_offset` (seconds east of UTC), `local_time`, and `ha_clock_age` (seconds
 since the last valid sample). Reading diagnostics does not count as activity.
 
+Connection diagnostics include `wifi_connected`, `ws_connected`, `ws_connections`,
+`ws_disconnects` (disconnect events, including failed connection attempts),
+`ws_authentications`, `ws_reconnects` (authentications after the first), and
+`ws_errors`. `uptime_ms`, `ws_last_connect_ms`, `ws_last_disconnect_ms`, and
+`ws_last_auth_ms` use milliseconds since boot; zero event timestamps mean no
+event has been recorded. `ws_last_disconnect_time` also reports the disconnect
+in HA local time when available. `ws_loop_max_gap_ms` records the longest gap
+between WebSocket processing calls.
+
+`ha_command_failures`, `ha_last_command_status`, and `ha_last_command_ms` report
+service errors separately. Status is an HTTP code, a negative transport error,
+or zero when no request ran. Counters reset on reboot.
+
 ## Serial configuration
 
 `115200` baud, commands start with `:`.
@@ -403,6 +419,10 @@ The full screen redraws at boot and when entering/leaving the dim palette.
 - Initial resync after WebSocket authentication and every five minutes
 - REST resync fetches all configured entities and climate AUX entities; only
   visible rows redraw. All configured entities receive WebSocket updates
+- HTTP requests, including the web entity selector, run on a worker while the
+  main thread continues WebSocket processing. Actions still wait for their HTTP
+  result; live state events received during a REST fetch take precedence over
+  that snapshot
 
 ## Build and flash
 
@@ -488,4 +508,5 @@ g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
   tools/test_ha_clock.cpp -o /tmp/m5-ha-clock-test
 /tmp/m5-ha-clock-test
 python3 tools/test_ha_clock_ws.py
+python3 tools/test_ha_http_worker.py
 ```

@@ -15,6 +15,7 @@ enum class EntityType : uint8_t {
 };
 
 struct AuxEntity {
+    uint32_t revision = 0;
     String id;
     String name;
     String state;
@@ -28,6 +29,7 @@ struct AuxEntity {
 };
 
 struct EntityState {
+    uint32_t revision = 0;
     String id;
     String name;
     String state;
@@ -75,6 +77,7 @@ bool haGetLocalTime(struct tm& timeinfo);
 String haTimeZone();
 String haLocalTimeText();
 String haClockStatus();
+String haConnectionStatus();
 void haSetStateCallback(HaStateCallback cb);
 void haSetStatusCallback(HaStatusCallback cb);
 void haSetAuthCallback(HaAuthCallback cb);

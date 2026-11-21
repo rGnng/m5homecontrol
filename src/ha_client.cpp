@@ -6,6 +6,11 @@
 #include <ArduinoJson.h>
 #include <WebSocketsClient.h>
 #include <esp_timer.h>
+#include <atomic>
+#include <functional>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
 
 #include "app_config.h"
 #include "ha_clock.h"
@@ -19,6 +24,18 @@ static uint32_t g_wsClockId = 0;
 static uint32_t g_clockRetryAt = 0;
 static HaClock g_haClock;
 static String g_haTimeZone;
+
+struct HaLinkStats {
+    uint32_t connections = 0, disconnects = 0, authentications = 0, errors = 0;
+    uint32_t lastConnectMs = 0, lastDisconnectMs = 0, lastAuthMs = 0;
+    uint32_t maxLoopGapMs = 0;
+    uint64_t lastLoopMs = 0;
+    String lastDisconnectTime;
+    int lastCommandStatus = 0;
+    uint32_t commandFailures = 0, lastCommandMs = 0;
+    uint32_t stateSequence = 0;
+};
+static HaLinkStats g_linkStats;
 
 static uint64_t clockMillis() { return esp_timer_get_time() / 1000; }
 
@@ -43,6 +60,27 @@ String haClockStatus() {
     text += " local_time=" + haLocalTimeText();
     text += " ha_clock_age=" + String(g_haClock.ready()
             ? static_cast<long>(g_haClock.ageMs(clockMillis()) / 1000) : -1L);
+    return text;
+}
+
+String haConnectionStatus() {
+    String text = "wifi_connected=" + String(WiFi.status() == WL_CONNECTED ? 1 : 0);
+    text += " ws_connected=" + String(haWsConnected() ? 1 : 0);
+    text += " ws_connections=" + String(g_linkStats.connections);
+    text += " ws_disconnects=" + String(g_linkStats.disconnects);
+    text += " ws_authentications=" + String(g_linkStats.authentications);
+    text += " ws_reconnects=" + String(g_linkStats.authentications > 0
+            ? g_linkStats.authentications - 1 : 0);
+    text += " ws_errors=" + String(g_linkStats.errors);
+    text += " ws_last_connect_ms=" + String(g_linkStats.lastConnectMs);
+    text += " ws_last_disconnect_ms=" + String(g_linkStats.lastDisconnectMs);
+    text += " ws_last_auth_ms=" + String(g_linkStats.lastAuthMs);
+    text += " ws_last_disconnect_time=" + (g_linkStats.lastDisconnectTime.isEmpty()
+            ? String("unavailable") : g_linkStats.lastDisconnectTime);
+    text += " ws_loop_max_gap_ms=" + String(g_linkStats.maxLoopGapMs);
+    text += " ha_command_failures=" + String(g_linkStats.commandFailures);
+    text += " ha_last_command_status=" + String(g_linkStats.lastCommandStatus);
+    text += " ha_last_command_ms=" + String(g_linkStats.lastCommandMs);
     return text;
 }
 
@@ -222,8 +260,52 @@ static String escapeHtml(const String& in) {
 // ---------------------------------------------------------------------
 //  HTTP (initial state fetch and service calls)
 // ---------------------------------------------------------------------
-static bool httpRequest(const String& method, const String& path,
-                        const String& body, String& response) {
+// HTTP owns its clients on a worker. The caller keeps servicing the WebSocket
+// on the main thread, so callbacks never race with the UI or entity cache.
+struct HttpWork {
+    std::function<bool()> operation;
+    std::atomic<bool> done{false};
+    bool ok = false;
+};
+static QueueHandle_t g_httpQueue = nullptr;
+static bool g_httpWaiting = false;
+
+static void httpWorkerTask(void*) {
+    for (;;) {
+        HttpWork* work = nullptr;
+        if (xQueueReceive(g_httpQueue, &work, portMAX_DELAY) == pdTRUE) {
+            work->ok = work->operation();
+            work->done.store(true, std::memory_order_release);
+        }
+    }
+}
+
+static bool runHttpWork(std::function<bool()> operation) {
+    if (g_httpWaiting) return false;
+    if (!g_httpQueue) {
+        g_httpQueue = xQueueCreate(1, sizeof(HttpWork*));
+        if (!g_httpQueue) return false;
+        if (xTaskCreate(httpWorkerTask, "ha-http", 12288, nullptr, 1, nullptr) != pdPASS) {
+            vQueueDelete(g_httpQueue);
+            g_httpQueue = nullptr;
+            return false;
+        }
+    }
+    HttpWork work;
+    work.operation = std::move(operation);
+    HttpWork* queued = &work;
+    if (xQueueSend(g_httpQueue, &queued, 0) != pdTRUE) return false;
+    g_httpWaiting = true;
+    while (!work.done.load(std::memory_order_acquire)) {
+        haLoop();
+        delay(1);
+    }
+    g_httpWaiting = false;
+    return work.ok;
+}
+
+static bool httpRequestBlocking(const String& method, const String& path,
+                                const String& body, String& response, int& status) {
     if (!configComplete()) return false;
 
     String url = g_config.haUrl + path;
@@ -249,9 +331,9 @@ static bool httpRequest(const String& method, const String& path,
         code = http.GET();
     } else {
         http.addHeader("Content-Type", "application/json");
-        if (g_commandCb) g_commandCb();
         code = http.POST(body);
     }
+    status = code;
 
     bool ok = (code >= 200 && code < 300);
     response = "";
@@ -266,14 +348,37 @@ static bool httpRequest(const String& method, const String& path,
     return ok;
 }
 
+static bool httpRequest(const String& method, const String& path,
+                        const String& body, String& response) {
+    int status = 0;
+    bool command = method != "GET";
+    if (command && g_commandCb) g_commandCb();
+    uint32_t started = millis();
+    bool ok = runHttpWork([&]() {
+        return httpRequestBlocking(method, path, body, response, status);
+    });
+    if (command) {
+        g_linkStats.lastCommandStatus = status;
+        g_linkStats.lastCommandMs = millis() - started;
+        if (!ok) ++g_linkStats.commandFailures;
+        Serial.printf("[ha] command status=%d duration=%lums ws=%d\n", status,
+                      static_cast<unsigned long>(g_linkStats.lastCommandMs), haWsConnected());
+    }
+    return ok;
+}
+
 bool haFetchState(EntityState& entity) {
     if (!configComplete() || entity.id.isEmpty()) return false;
 
+    uint32_t revision = entity.revision;
     String body;
     if (!httpRequest("GET", "/api/states/" + entity.id, "", body)) {
+        if (entity.revision != revision) return true;
         entity.available = false;
         return false;
     }
+    // A state event received while HTTP was waiting is newer than this snapshot.
+    if (entity.revision != revision) return true;
 
     JsonDocument doc;
     if (deserializeJson(doc, body)) {
@@ -285,7 +390,7 @@ bool haFetchState(EntityState& entity) {
     return true;
 }
 
-bool haFetchEntityOptions(String& optionsHtml, int maxOptions) {
+static bool fetchEntityOptionsBlocking(String& optionsHtml, int maxOptions) {
     if (!configComplete()) return false;
 
     String url = g_config.haUrl + "/api/states";
@@ -343,6 +448,10 @@ bool haFetchEntityOptions(String& optionsHtml, int maxOptions) {
     }
     Serial.printf("[ha] entity list loaded=%d\n", added);
     return added > 0;
+}
+
+bool haFetchEntityOptions(String& optionsHtml, int maxOptions) {
+    return runHttpWork([&]() { return fetchEntityOptionsBlocking(optionsHtml, maxOptions); });
 }
 
 bool haCallService(const String& domain, const String& service,
@@ -428,6 +537,8 @@ static void wsHandleText(const uint8_t* payload, size_t length) {
 
     if (type == "auth_ok") {
         g_wsAuthed = true;
+        ++g_linkStats.authentications;
+        g_linkStats.lastAuthMs = millis();
         notifyStatus(true);
         Serial.println("[ha] ws authenticated");
         wsSubscribe();
@@ -438,6 +549,7 @@ static void wsHandleText(const uint8_t* payload, size_t length) {
 
     if (type == "auth_invalid") {
         g_wsAuthed = false;
+        ++g_linkStats.errors;
         notifyStatus(false);
         Serial.println("[ha] auth invalid, will retry");
         ws.disconnect();
@@ -470,6 +582,7 @@ static void wsHandleText(const uint8_t* payload, size_t length) {
         EntityState state;
         state.id = entityId;
         parseState(state, newState);
+        state.revision = ++g_linkStats.stateSequence;
         if (g_stateCb) g_stateCb(state);
     }
 }
@@ -479,18 +592,30 @@ static void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
         case WStype_CONNECTED:
             g_wsAuthed = false;
             g_wsClockId = 0;
-            Serial.println("[ha] ws connected");
+            ++g_linkStats.connections;
+            g_linkStats.lastConnectMs = millis();
+            notifyStatus(false);
+            Serial.printf("[ha] ws connected at=%lu count=%lu\n",
+                          static_cast<unsigned long>(g_linkStats.lastConnectMs),
+                          static_cast<unsigned long>(g_linkStats.connections));
             break;
         case WStype_DISCONNECTED:
             g_wsAuthed = false;
             g_wsClockId = 0;
+            ++g_linkStats.disconnects;
+            g_linkStats.lastDisconnectMs = millis();
+            g_linkStats.lastDisconnectTime = haLocalTimeText();
             notifyStatus(false);
-            Serial.println("[ha] ws disconnected");
+            Serial.printf("[ha] ws disconnected at=%lu count=%lu wifi=%d\n",
+                          static_cast<unsigned long>(g_linkStats.lastDisconnectMs),
+                          static_cast<unsigned long>(g_linkStats.disconnects),
+                          WiFi.status() == WL_CONNECTED);
             break;
         case WStype_TEXT:
             wsHandleText(payload, length);
             break;
         case WStype_ERROR:
+            ++g_linkStats.errors;
             Serial.println("[ha] ws error");
             break;
         default:
@@ -534,7 +659,15 @@ void haBegin() {
 }
 
 void haLoop() {
-    if (g_wsStarted) ws.loop();
+    if (g_wsStarted) {
+        uint64_t now = clockMillis();
+        if (g_linkStats.lastLoopMs) {
+            uint32_t gap = static_cast<uint32_t>(now - g_linkStats.lastLoopMs);
+            if (gap > g_linkStats.maxLoopGapMs) g_linkStats.maxLoopGapMs = gap;
+        }
+        g_linkStats.lastLoopMs = now;
+        ws.loop();
+    }
     if (g_wsAuthed && (int32_t)(millis() - g_clockRetryAt) >= 0) {
         if (g_wsClockId) {
             JsonDocument doc;
