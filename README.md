@@ -2,6 +2,8 @@
 
 A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 
+![Device screen showing the Flipper theme and Japanese and English entity names](docs/images/screen.png)
+
 - M5Code-style menu: eight rows per page
 - Two themes: `Flipper` (default) and `Classic`
 - Bitmap font for menu rows, states, and detail values
