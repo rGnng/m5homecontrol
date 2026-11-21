@@ -170,12 +170,14 @@ dock hint to change its power policy.
 - Wi-Fi uses minimum modem power saving while retaining its association and
   WebSocket heartbeat. Larger HTTP transfers temporarily disable modem sleep
   and restore its previous setting afterward.
-- CPU speed is set once to 160 MHz before Wi-Fi starts. Runtime frequency
-  switching is disabled after the device failed an idle/wake test. Idle still
-  reduces background polling after 15 seconds or when the display is dim/off.
-- Display off sets backlight brightness to zero and keeps the LCD controller
-  awake. Wake repaints cached HA state before lighting the screen. LCD controller
-  sleep is disabled pending reliable hardware wake testing.
+- After 15 seconds without input, or when the display is dim/off, CPU speed
+  drops to 80 MHz. Input and sounds restore 160 MHz. Both speeds share the
+  ESP32's 320 MHz PLL, selected before Wi-Fi starts. HTTP work, web
+  configuration, and screenshots temporarily restore that
+  speed; firmware uploads keep it restored until upload completion.
+- Display off sends the LCD controller to sleep as well as setting backlight
+  brightness to zero. Wake repaints cached HA state before lighting the screen.
+  Screenshot reads temporarily wake the controller with the backlight off.
 - The speaker task and DAC stop one second after a sound finishes. GPIO25 is
   driven low on Core Basic. This quiets the signal path; the board does not
   provide a separate amplifier shutdown control.

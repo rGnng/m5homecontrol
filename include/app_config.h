@@ -63,5 +63,7 @@ String menuStatus();
 String backlightStatus();
 String refreshStatus();
 bool setDisplayMode(const String& mode);
+bool beginDisplayRead();
+void endDisplayRead(bool restoreSleep);
 
 void appConfigHandleCommand(const String& line);

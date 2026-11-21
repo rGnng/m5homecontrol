@@ -369,6 +369,7 @@ static BacklightPhase g_backlightPhase = BacklightPhase::Normal;
 static int g_backlightOverride = -1;
 static int g_appliedBrightness = -1;
 static uint8_t g_backlightPercent = 0;
+static bool g_lcdSleeping = false;
 
 static void connectedPowerTick() {
     if (!g_audioQuiet && !M5.Speaker.isPlaying() && millis() - g_lastSoundAt >= 1000) quietAudio();
@@ -376,6 +377,15 @@ static void connectedPowerTick() {
                 && !M5.Speaker.isPlaying();
     setConnectedPowerIdle(idle);
     setPowerPollingIdle(idle);
+}
+
+bool beginDisplayRead() {
+    if (g_lcdSleeping) M5.Display.wakeup();  // Saved brightness is zero: no backlight flash.
+    return g_lcdSleeping;
+}
+
+void endDisplayRead(bool restoreSleep) {
+    if (restoreSleep && g_lcdSleeping) M5.Display.sleep();
 }
 
 // ---------------------------------------------------------------------
@@ -484,7 +494,11 @@ static bool inTimeRange(int now, int start, int end) {
 }
 
 static void applyBacklightPlan(BacklightPlan plan) {
-    bool waking = g_backlightPhase == BacklightPhase::Off && plan.phase != BacklightPhase::Off;
+    bool waking = g_lcdSleeping && plan.phase != BacklightPhase::Off;
+    if (waking) {
+        M5.Display.wakeup();
+        g_lcdSleeping = false;
+    }
     // Preserve the current palette while off; repaint it before lighting the
     // screen on wake. Entering dim mode reduces the backlight before repaint.
     bool dimTheme = plan.phase == BacklightPhase::Off ? g_dimTheme
@@ -497,6 +511,10 @@ static void applyBacklightPlan(BacklightPlan plan) {
     }
     g_backlightPhase = plan.phase;
     applyBacklightPercent(plan.brightness);
+    if (plan.phase == BacklightPhase::Off && !g_lcdSleeping) {
+        M5.Display.sleep();
+        g_lcdSleeping = true;
+    }
 }
 
 static void scheduleTick(bool explicitInput) {
@@ -549,7 +567,7 @@ String backlightStatus() {
     return "backlight=" + String(state) + " backlight_pwm=" + String(g_appliedBrightness) +
            " dim_theme=" + String((int)g_dimTheme) +
            " display_override=" + String(g_backlightOverride) +
-           " lcd_sleep=0" +
+           " lcd_sleep=" + String(g_lcdSleeping ? 1 : 0) +
            " audio_quiet=" + String(g_audioQuiet ? 1 : 0) +
            " power_sample_interval_ms=" + String(powerSampleIntervalMs()) +
            " keypad_poll_ms=" + String(connectedPowerIdle() ? 100 : 20);
@@ -1243,7 +1261,7 @@ static void redrawStatusRegions() {
 }
 
 static void renderDirty() {
-    if (g_backlightPhase == BacklightPhase::Off) return;  // Wake repaints cached state.
+    if (g_lcdSleeping) return;  // Retain dirty flags; wake repaints the latest cached state.
     if (g_detail) {
         bool detailDirty = (g_detailGlobal >= 0 && g_dirty[g_detailGlobal]);
         for (int i = 0; i < MAX_ENTITIES; i++) g_dirty[i] = false;

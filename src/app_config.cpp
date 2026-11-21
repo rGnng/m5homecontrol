@@ -954,7 +954,7 @@ static void handleFirmwareUpload() {
     HTTPUpload& upload = server.upload();
     if (upload.status == UPLOAD_FILE_START) {
         // WebServer processes the upload in this main-loop invocation. Keep
-        // modem sleep disabled until completion, including between chunks.
+        // full CPU speed until the request completes, including between chunks.
         setConnectedPowerIdle(false);
         if (!g_firmwarePowerWork) {
             beginConnectedPowerWork();
@@ -1029,6 +1029,11 @@ static void handleFirmwareComplete() {
 
 static void handleScreenshot() {
     ConnectedPowerWork powerWork;
+    bool restoreSleep = beginDisplayRead();
+    struct RestorePanel {
+        bool sleep;
+        ~RestorePanel() { endDisplayRead(sleep); }
+    } restore{restoreSleep};
     // Read cached panel pixels without navigating or lighting the backlight.
     constexpr int width = 320, height = 240;
     constexpr size_t rowBytes = width * 3;  // 960 bytes; already a multiple of 4.

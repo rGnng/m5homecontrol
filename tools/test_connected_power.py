@@ -48,22 +48,22 @@ cpu_test = r'''
 #include <cassert>
 int main(){
     setConnectedPowerIdle(false);assert(cpu==160 && frequencies==std::vector<uint32_t>({160}));
-    setConnectedPowerIdle(true);assert(cpu==160 && connectedPowerIdle());
+    setConnectedPowerIdle(true);assert(cpu==80 && connectedPowerIdle());
     {
         ConnectedPowerWork outer;assert(cpu==160 && ps==WIFI_PS_NONE);
         {ConnectedPowerWork inner;assert(cpu==160 && ps==WIFI_PS_NONE);}
         assert(cpu==160 && ps==WIFI_PS_NONE);
         setConnectedPowerIdle(true);assert(cpu==160);
     }
-    assert(cpu==160 && ps==WIFI_PS_MIN_MODEM);
-    endConnectedPowerWork();assert(cpu==160);
+    assert(cpu==80 && ps==WIFI_PS_MIN_MODEM);
+    endConnectedPowerWork();assert(cpu==80);
     setConnectedPowerIdle(false);assert(cpu==160);
-    setConnectedPowerIdle(true);assert(cpu==160);
-    assert(frequencies==std::vector<uint32_t>({160}));
-    assert(connectedPowerStatus().find("cpu_policy=fixed cpu_mhz=160 wifi_sleep=minimum")!=String::npos);
+    cpuAllowed=false;setConnectedPowerIdle(true);assert(cpu==160);
+    cpuAllowed=true;setConnectedPowerIdle(true);assert(cpu==80);
+    assert(connectedPowerStatus().find("cpu_mhz=80 wifi_sleep=minimum")!=String::npos);
     ps=WIFI_PS_NONE;assert(connectedPowerStatus().find("wifi_sleep=none")!=String::npos);
     psError=1;assert(connectedPowerStatus().find("wifi_sleep=unavailable")!=String::npos);
-    std::puts("PASS: fixed CPU initialized once, no idle/work clock switching, nested Wi-Fi transfer guards and diagnostics");
+    std::puts("PASS: actual CPU idle/boost, nested work guards, failed frequency changes and Wi-Fi diagnostics");
 }
 '''
 deadline_test = r'''
@@ -127,7 +127,7 @@ struct Panel {
 };
 struct {struct Speaker Speaker;Panel Display;m5::board_t getBoard(){return m5::board_t::board_M5Stack;}}M5;
 static uint32_t g_lastSoundAt=0,g_lastActivity=0;
-static bool g_audioQuiet=false,g_dimTheme=false;
+static bool g_audioQuiet=false,g_lcdSleeping=false,g_dimTheme=false;
 static BacklightPhase g_backlightPhase=BacklightPhase::Normal;
 static void applyBacklightPercent(uint8_t value){panelEvents.push_back("brightness="+String(value));}
 static void applyTheme(){panelEvents.push_back("theme");}
@@ -168,12 +168,15 @@ int main(){
     M5.Speaker.playing=false;connectedPowerTick();assert(idle && g_audioQuiet && dacOff==2);
     g_lastActivity=now;g_backlightPhase=BacklightPhase::Dim;connectedPowerTick();assert(idle);
     g_backlightPhase=BacklightPhase::Normal;connectedPowerTick();assert(!idle);
-    // Off only darkens the backlight; wake repaints before lighting it.
+    // Off sleeps the panel after brightness zero. Wake repaints in darkness.
     panelEvents.clear();applyBacklightPlan({BacklightPhase::Off,0});
-    assert(panelEvents==std::vector<String>({"brightness=0"}));
+    assert(g_lcdSleeping && panelEvents==std::vector<String>({"brightness=0","sleep"}));
+    assert(beginDisplayRead());endDisplayRead(true);
+    assert(g_lcdSleeping && panelEvents[2]=="wake" && panelEvents[3]=="sleep");
     panelEvents.clear();applyBacklightPlan({BacklightPhase::Normal,5});
-    assert(panelEvents==std::vector<String>({"brightness=0","theme","paint","brightness=5"}));
-    panelEvents.clear();applyBacklightPlan({BacklightPhase::Dim,1});assert(g_dimTheme);
+    assert(!g_lcdSleeping && panelEvents==std::vector<String>({"wake","brightness=0","theme","paint","brightness=5"}));
+    panelEvents.clear();assert(!beginDisplayRead());endDisplayRead(false);assert(panelEvents.empty());
+    applyBacklightPlan({BacklightPhase::Dim,1});assert(g_dimTheme && !g_lcdSleeping);
     // Initial sweep includes all configured slots and AUX values, then remains quiet.
     now=20000;g_config.entityCount=4;
     g_cards[0].id="light.a";g_cards[0].aux.id="switch.aux";
@@ -197,15 +200,15 @@ int main(){
     // Connection recovery forces a full snapshot. Offline never sends HTTP.
     wifiStatus=0;count=reads.size();now+=30000;sweep();assert(reads.size()==count);
     wifiStatus=WL_CONNECTED;onHaAuth();sweep();assert(reads.size()==count+4);
-    g_backlightPhase=BacklightPhase::Off;g_dirty[0]=true;renderDirty();assert(g_dirty[0] && draws==0);
-    g_backlightPhase=BacklightPhase::Normal;renderDirty();assert(!g_dirty[0] && draws>0);
+    g_lcdSleeping=true;g_dirty[0]=true;renderDirty();assert(g_dirty[0] && draws==0);
+    g_lcdSleeping=false;renderDirty();assert(!g_dirty[0] && draws>0);
     // Duplicate entities stay consistent in every primary and AUX slot.
     g_cards[1].aux.id="light.a";g_cards[2].aux.id="light.a";g_cards[0].customName="Custom";
     EntityState state;state.id="light.a";state.state="on";state.revision=7;
     onHaState(state);assert(g_cards[0].state=="on" && g_cards[2].state=="on");
     assert(g_cards[2].aux.state=="on");
     assert(g_cards[1].aux.state=="on" && g_cards[0].name=="Custom");
-    std::puts("PASS: actual idle/audio policy, backlight-only off/wake sequencing, targeted REST, AUX races/errors, retry backoff, offline/reconnect and duplicate states");
+    std::puts("PASS: actual idle/audio policy, dark LCD wake/read sequencing, targeted REST, AUX races/errors, retry backoff, offline/reconnect and duplicate states");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='m5-connected-power-') as directory:
@@ -221,7 +224,7 @@ with tempfile.TemporaryDirectory(prefix='m5-connected-power-') as directory:
     subprocess.run(flags+[str(tmp/'deadline.cpp'),'-o',str(tmp/'deadline')],check=True)
     subprocess.run([str(tmp/'deadline')],check=True)
     signatures=['static void quietAudio(', 'static void playUiSound(', 'static void connectedPowerTick(',
-                'static void applyBacklightPlan(',
+                'bool beginDisplayRead(', 'void endDisplayRead(', 'static void applyBacklightPlan(',
                 'static void renderDirty(', 'static void requestEntityRefresh(', 'static void onHaAuth(', 'static void onHaState(', 'static void refreshTick(']
     (tmp/'policy.cpp').write_text(policy_prefix+''.join(function(s) for s in signatures)+policy_tests)
     subprocess.run(flags+[str(tmp/'policy.cpp'),'-o',str(tmp/'policy')],check=True)
