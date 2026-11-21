@@ -6,8 +6,8 @@ A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 
 - M5Code-style menu: eight rows per page
 - Two themes: `Flipper` (default) and `Classic`
-- Bitmap font for menu rows, states, and detail values
-- Font trial: BoutiqueBitmap9x9 Regular, with each native dot doubled exactly
+- BoutiqueBitmap9x9 Regular for menu rows, states, and detail values, with each
+  native dot doubled exactly
   (typical CJK ink 18×18 px); see [font details](assets/fonts/README.md)
 - Numbered index column, entity name, live state on the right
 - Dynamic number of pages, eight entities per page
@@ -81,14 +81,8 @@ of pages, including empty pages.
 - Maximum 12 pages / 96 slots
 - Page title defaults to `PAGEn` (no space)
 - Empty slots stay in place; pages are not compacted
-- Page 1 can have three entities and five empty slots; page 2 stays independent
 
-Page switching:
-
-- Grid **r1c2 (M)** / **r1c3 (%)** while the menu is visible; wraps at either end
-- Serial `p` / `n`
-
-The Core's **A/C** buttons move the cursor within the current page.
+See [Controls](#controls) for page switching and cursor navigation.
 
 ## Battery and power
 
@@ -99,7 +93,6 @@ brightness including the day/night schedule, and turns off after 300 ms.
 It runs independently of HTTP, so slow HA responses do not freeze it. A new
 command restarts the sweep. Polling and incoming state updates do not trigger it.
 
-The automatic battery-level bar and web LED test controls remain removed.
 A black frame clears any latched LED color at startup. `/diag` reports command
 animation readiness, brightness (0-255), duration, theme color, active state,
 trigger count, and the last sweep's frame count and visited-pixel mask
@@ -163,40 +156,54 @@ so actual dock charging detection requires a hardware status connection.
 
 ## Backlight schedule
 
-Configured in the web page under **Display**. Schedule times use Home Assistant's
-configured timezone. A watched HA `now()` template supplies UTC time, the current
-UTC offset, and the timezone name over the authenticated WebSocket connection.
-Updates arrive on connection and at each minute boundary, so HA handles daylight
-saving and timezone changes. No fixed UTC+8 timezone or public NTP server is used.
-The web Display section shows HA local time and timezone when the page is loaded.
+Configure **Display** in the web page. Schedule times follow
+[Home Assistant's local time](#home-assistant-time).
 
-- `day`: 07:00-21:00, brightness 5%, automatic dim/off disabled by default
-- `night`: 21:00-07:00, brightness 5%; after 10 minutes idle, dim at 1% for
-  2 more minutes, then turn off (12 minutes total)
-- Each period has normal/dim brightness, an idle-to-dim timeout, and a
-  dim-to-off timeout. The web form uses seconds: night defaults are 600 and 120
-- Dim mode uses a black background, faint grey text, and subdued selection,
-  numbers, status icons, and editing colors regardless of the chosen normal theme
-- `0` disables a timeout. If dimming is disabled, the off timeout starts at last input
-- Any device button or serial navigation key restores the normal theme/brightness
-  and resets idle time
-- From dim, a key restores the normal view and performs its action. From off,
-  the first press only wakes the display; the next press performs its action.
-  A held A/B/C wake press stays suppressed until release, including B's long press
-- Background updates, schedule changes, and clock recovery cannot wake or
-  brighten a dim/off screen
-- Web **Wake**, **Dim**, and **Off** buttons preview the live display using saved
-  brightness settings without saving. Device input clears the preview; Wake returns
-  to the normal view
-- Older custom nonzero off timeouts keep their direct-to-off behavior; an old
-  disabled night timeout adopts the new 10-minute/2-minute defaults
+| Default period | Local hours | Normal brightness | Idle before dim | Dim brightness | Time in dim before off |
+| --- | --- | --- | --- | --- | --- |
+| Day | 07:00–21:00 | 5% | Disabled | 1% | Disabled |
+| Night | 21:00–07:00 | 5% | 10 minutes | 1% | 2 minutes |
 
-The fallback brightness is used until the first valid HA clock sample arrives.
-Between updates, a 64-bit monotonic clock keeps time advancing. If HA disconnects,
-the last known offset is retained until a fresh sample arrives after reconnect;
-DST/timezone changes while offline cannot be learned until then. Missing or
-invalid clock updates are retried without changing the last good clock.
-Once dim/off, clock synchronization cannot brighten the display.
+The night defaults turn the display off after 12 minutes without input. The form
+uses seconds: 600 before dim and another 120 before off. Set a timeout to `0` to
+disable it. If dimming is disabled, the off timeout counts from the last input.
+
+| Display state | Appearance | First device key press |
+| --- | --- | --- |
+| Normal | Selected theme and scheduled brightness | Performs its action and resets idle time |
+| Dim | Black background, faint grey text, subdued selection and icons | Restores the normal view and performs its action |
+| Off | Backlight off | Wakes the display only; release and press again to act |
+
+These rules cover the Core buttons, keypad, and serial navigation keys. A Core
+A/B/C press used to wake an off display is suppressed until release; holding B
+cannot open a detail panel during that wake press.
+
+Incoming HA values, clock updates, and day/night transitions do not wake or
+brighten a dim/off display. Background scheduling may make it darker or turn it off.
+Web **Wake**, **Dim**, and **Off** preview the display using saved brightness
+settings without saving or running an entity action. Device input clears the
+preview, resets idle time, and restores the normal view.
+
+## Home Assistant time
+
+The firmware subscribes to an HA `now()` template over the authenticated
+WebSocket connection. HA supplies the UTC timestamp, current UTC offset, and
+timezone name immediately after authentication and at each minute boundary.
+Time updates are pushed by HA; there is no periodic REST time poll or NTP server.
+
+- HA's configured timezone and current offset determine the day/night schedule,
+  including daylight saving and timezone changes while connected
+- A 64-bit monotonic clock advances time between updates and while disconnected
+- While offline, the last known offset is retained; timezone/DST changes are
+  learned after reconnection, when a fresh clock subscription is created
+- Failed or invalid clock updates trigger a subscription retry after 30 seconds;
+  a subscription with no valid update for three minutes is recreated
+- Until the first valid time sample, the configured fallback brightness is used
+  and automatic dim/off timers wait for the clock
+
+The web **Display** section shows HA local time and timezone as a snapshot when
+the page loads. `/diag` exposes the clock source and sample age; see
+[Web endpoints](#web-endpoints) for the diagnostic fields.
 
 ## Sound
 
@@ -265,8 +272,7 @@ working memory. Capturing does not wake the display or change pages.
 
 Backlight diagnostics include `backlight=normal|dim|off`, `backlight_pwm` (0–255),
 `dim_theme` (0/1), and `display_override` (-1 for automatic, 1 for Dim preview,
-2 for Off preview). **Wake** and physical input clear the override. Automatic
-updates may dim or turn off the screen, but cannot wake or brighten it.
+2 for Off preview).
 Clock diagnostics include `time_source=ha|unavailable`, `ha_timezone`,
 `utc_offset` (seconds east of UTC), `local_time`, and `ha_clock_age` (seconds
 since the last valid sample). Reading diagnostics does not count as activity.
@@ -292,19 +298,30 @@ since the last valid sample). Reading diagnostics does not count as activity.
 
 ## Controls
 
-| Input | Action |
+The following actions follow the [dim/off wake rules](#backlight-schedule).
+Only AC (`climate.*`) items have a detail panel; sensors are read-only.
+
+### Core A/B/C buttons
+
+| Button | Main menu | AC detail |
+| --- | --- | --- |
+| A | Cursor up | Cursor up; decrease the draft temperature while editing |
+| B, short press | Toggle/run the selected entity; cycle an AC's allowed modes and OFF | Activate the selected control or confirm a temperature edit |
+| B, hold for 600 ms | Open the selected AC's detail panel | Discard an unconfirmed edit and return to the main menu |
+| C | Cursor down | Cursor down; increase the draft temperature while editing |
+
+Cursor movement wraps within the current page and skips empty menu slots.
+
+### FACES Calculator3 keypad
+
+| Physical key | Action |
 | --- | --- |
-| A / C | cursor up / down (wraps within the page, skips empty slots) |
-| B short press | toggle the focused entity / cycle AC mode; activate the focused AC detail control |
-| B long press | open AC detail from the menu / return to the menu from AC detail |
-| 1-8 in the main menu | select and run that slot on the current page |
-| FACES keypad 1-7 in AC detail | focus that control; B or r5c4 activates/confirms it |
-| FACES keypad r1c1 (AC) | back to main menu; discards an unconfirmed temperature edit |
-| FACES keypad r1c2 (M) / r1c3 (%) | previous / next page (wraps at either end; main menu only) |
-| FACES keypad 0 | back / cancel temperature edit |
-| FACES keypad r5c4 (=), short or long press | open AC detail if available; otherwise toggle/run the focused entity; activate or confirm within AC detail |
-| FACES keypad r3c4 (+) / r4c4 (-) | increase / decrease the selected adjustable value |
-| Select an AC item | cycle OFF and its allowed, HA-supported modes |
+| r1c1 (AC), short or long press | Return to the main menu, discarding an unconfirmed temperature edit |
+| r1c2 (M) / r1c3 (%) | Previous / next page, wrapping at either end; main menu only |
+| 1–8 | Select and run that main-menu slot; in AC detail, 1–7 only focus a control |
+| r3c4 (+) / r4c4 (−) | Increase / decrease the selected adjustable value |
+| 0 | Cancel a temperature edit; otherwise return to the main menu |
+| r5c4 (=), short or long press | Open AC detail if available; otherwise toggle/run the selected entity. In AC detail, activate the control or confirm an edit |
 
 Number positions are remapped on the physical keypad:
 
@@ -315,23 +332,25 @@ r3      4    5    6    +
 r4      7    8    9    -
 ```
 
-Other keypad positions keep their existing behavior. There are eight menu slots,
-so 9 has no assigned slot. Serial digits retain their normal numeric meanings.
+There are eight menu slots, so 9 has no assigned slot.
 
-In the main menu, `+`/`-` adjusts AC target temperature by HA's reported
-`target_temp_step`, clamped to `min_temp`/`max_temp`, or light brightness by 10
-percentage points, clamped to 0-100%. At 0%, the light turns off. On/off-only
-lights, unavailable entities, sensors, and other non-adjustable items do nothing.
-The target/value updates after a successful HA command; no command is sent when
-already at the requested limit. Adjusting AC temperature does not optimistically
-change its power state.
-The AC menu shows the target setpoint, so successful `+`/`-` changes are visible
-immediately even while the measured room temperature remains steady.
+### Adjusting values
 
-Only AC items have a detail panel. Sensors remain read-only in the main menu.
-These actions apply when the display is normal or dim. When it is off, the
-first key press only wakes it, including a held B press; release and press again
-to perform an action. Web **Wake** changes only the display state.
+- Main-menu AC: `+`/`-` changes target temperature by HA's `target_temp_step`,
+  within `min_temp`/`max_temp`. The displayed setpoint updates after success
+- Main-menu dimmable light: changes brightness by 10 percentage points within
+  0–100%; reaching 0% turns it off
+- AC detail: adjusts the highlighted TEMP or dimmable-light AUX value. TEMP
+  changes are immediate unless an explicit draft edit is active
+- On/off-only lights, unavailable entities, and non-adjustable selections ignore
+  these keys. No command is sent when already at the requested limit
+
+### Serial navigation
+
+Serial keys use logical digits without the physical keypad remap:
+`1`–`8` select/run a slot, `w`/`s` move the cursor, `p`/`n` (or `M`/`%`)
+change pages, `e` activates, `=` opens AC detail or runs the selection,
+`.` opens AC detail, `0` goes back/cancels, and `+`/`-` adjusts values.
 
 ## AC detail
 
@@ -349,27 +368,23 @@ Long press B on a `climate.*` row opens a detail menu with eight numbered rows:
 ```
 
 - MODE cycles OFF plus the allowed, HA-supported modes configured in the web UI
-- TEMP enters edit mode: A/C change by `target_temp_step`, B confirms; long B discards the edit and returns to the menu
-- With TEMP highlighted, `+`/`-` adjusts it immediately; during an explicit edit,
-  `+`/`-` changes the draft and B/r5c4 still confirms it
-- With a dimmable light AUX highlighted, `+`/`-` adjusts its brightness; the AUX
-  value shows its percentage. Other AC detail rows ignore these keys
+- TEMP enters draft edit mode; use the [controls above](#controls) to adjust,
+  confirm, or cancel it
 - FAN and SWING cycle the HA `fan_modes` / `swing_modes`
 - ACTION and CURRENT are read-only
-- Only climate items can have an AUX entity; switches/lights toggle, scenes run, sensors are read-only
-- The AUX row uses the configured AUX display name
-- Rows use uppercase text; value updates redraw only the changed text area
+- AUX uses its configured display name; lights/switches toggle, scenes run,
+  media players play/pause, covers toggle, and sensors are read-only. Dimmable
+  light values include the brightness percentage. The cursor skips this row
+  when no AUX entity is configured
+- Rows use uppercase text
 - The status bar shows the AC display name and hides page squares
 - Missing values show `--`
 - Row 8 stays visible with its number, but has no label or action and is skipped by cursor navigation
-- Keypad r1c1 (AC) returns to the main menu with a short or long press; there is no Back row
+- There is no Back row; navigation uses the controls above
 
 The [official Calculator3 protocol](https://docs.m5stack.com/en/protocol/A005-V3/I2C)
 defines r1c1 as ASCII `A` on a short press and backspace on a long press.
 Key data is read directly from I2C address `0x08`, without a register address.
-
-Serial developer keys: `1-8`, `w`/`s` focus, `p`/`n` page, `e`/Enter action,
-`0` back, `M`/`%` previous/next page, `.` AC detail, `+`/`-` adjust.
 
 Value refreshes in the menu and AC panel redraw only changed text bounds;
 unchanged values are skipped. Shorter values clear their previous width so no
@@ -377,7 +392,6 @@ old characters remain. Labels redraw only when their text, color, or truncation
 changes. Selection, edit highlighting, and page changes redraw the affected rows.
 Full-screen and panel-transition clears use black before painting the theme.
 The full screen redraws at boot and when entering/leaving the dim palette.
-Ordinary value refreshes do not clear the entire row or screen.
 
 ## Home Assistant API
 
@@ -385,6 +399,7 @@ Ordinary value refreshes do not clear the entire row or screen.
 - `GET /api/states` entity selector
 - REST service calls for control
 - WebSocket `ws://<host>:8123/api/websocket` for `state_changed`
+- WebSocket `render_template` subscription for [HA time](#home-assistant-time)
 - Initial resync after WebSocket authentication and every five minutes
 - REST resync fetches all configured entities and climate AUX entities; only
   visible rows redraw. All configured entities receive WebSocket updates

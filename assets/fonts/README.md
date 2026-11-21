@@ -1,4 +1,4 @@
-# Remote Dot 2x font trial
+# Remote Dot 2x font
 
 Generated from the supplied `BoutiqueBitmap9x9_1.6.ttf`, Regular weight.
 `source.json` records the exact source checksum and conversion settings.
