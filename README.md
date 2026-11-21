@@ -214,7 +214,7 @@ anonymous viewing.
 2. Create a token
 3. Open the device web page and paste the token
 
-The base URL is pre-filled with `http://10.0.0.11:8123`.
+Enter your Home Assistant base URL, such as `http://<ha-host>:8123`.
 
 ### Entity selector
 
@@ -405,8 +405,8 @@ in [include/app_config.h](include/app_config.h).
 
 ```sh
 pio run
-pio run -t upload --upload-port /dev/cu.usbserial-5A6C0461241
-pio device monitor -p /dev/cu.usbserial-5A6C0461241 -b 115200
+pio run -t upload --upload-port "<serial-port>"
+pio device monitor -p "<serial-port>" -b 115200
 ```
 
 After the first USB flash, update over Wi-Fi through the web firmware page.
@@ -416,8 +416,7 @@ access at `http://<hostname>.local/`.
 ### HTTP firmware updates
 
 Open **Update firmware** on the configuration page, or go directly to
-`http://<device-ip>/update`. Through the existing tunnel, use
-`http://127.0.0.1:10090/update`.
+`http://<device-ip>/update`.
 
 - Username: `admin`; password: `haremote`
 - Select `.pio/build/m5stack-core/firmware.bin`, then **Upload and restart**
@@ -425,13 +424,14 @@ Open **Update firmware** on the configuration page, or go directly to
 - Existing configuration is kept
 - HTTP uploads use the existing web port, TCP 80; no UDP or callback port is needed
 
-Command-line upload through the tunnel:
+Command-line upload (replace `<device-ip>` with your device's address):
 
 ```sh
 firmware=.pio/build/m5stack-core/firmware.bin
 curl --fail-with-body --user admin:haremote \
+  -H 'Expect:' \
   -F "firmware=@$firmware" \
-  "http://127.0.0.1:10090/update?size=$(wc -c < "$firmware" | tr -d ' ')"
+  "http://<device-ip>/update?size=$(wc -c < "$firmware" | tr -d ' ')"
 ```
 
 Use USB for the first installation if the device has no `/update` endpoint.

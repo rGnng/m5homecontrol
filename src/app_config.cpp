@@ -11,7 +11,7 @@
 #include "power_status.h"
 
 static const char* NVS_NAMESPACE = "haremote";
-static const char* DEFAULT_HA_URL = "http://10.0.0.11:8123";
+static const char* DEFAULT_HA_URL = "";
 static const char* DEFAULT_HOSTNAME = "ha-remote";
 
 AppConfig g_config;
@@ -523,7 +523,7 @@ static void handleRoot() {
     page += "<label>Wi-Fi password (leave blank to keep the saved password)</label>";
     page += "<input name=\"pass\" type=\"password\" autocomplete=\"off\">";
     page += "<label>Home Assistant base URL</label><input name=\"url\" value=\"" +
-            htmlEscape(g_config.haUrl) + "\" placeholder=\"http://10.0.0.11:8123\">";
+            htmlEscape(g_config.haUrl) + "\" placeholder=\"http://&lt;ha-host&gt;:8123\">";
     page += "<label>Long-lived access token (leave blank to keep the saved token)</label>";
     page += "<input name=\"token\" type=\"password\" autocomplete=\"off\" placeholder=\"";
     page += g_config.haToken.isEmpty() ? "not configured" : "configured";

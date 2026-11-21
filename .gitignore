@@ -2,3 +2,4 @@
 backup/
 preview/
 .DS_Store
+.local/

@@ -2,11 +2,11 @@
 """Capture a screenshot from the M5Stack Home Control UI over USB serial.
 
 The firmware sends a raw RGB565 frame when it receives an uppercase 'S'.
-Protocol: b"SHOT" + <u16 width> + <u16 height> + <u32 length> + pixels + b"DONE"
+Protocol: b"SHOTIMG" + <u16 width> + <u16 height> + <u32 length> + pixels + b"DONE"
 
 Usage:
-    python3 tools/capture.py --port /dev/cu.usbserial-5A6C0461241
-    python3 tools/capture.py --out preview/home.png
+    python3 tools/capture.py --port "<serial-port>"
+    python3 tools/capture.py --port "<serial-port>" --out preview/home.png
 """
 
 from __future__ import annotations
@@ -76,7 +76,7 @@ def rgb565le_to_rgb(pixels: bytes, width: int, height: int) -> bytes:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", default="/dev/cu.usbserial-5A6C0461241")
+    parser.add_argument("--port", required=True, help="device USB serial port")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--out", default="preview/home.png")
     parser.add_argument("--timeout", type=float, default=30.0)
