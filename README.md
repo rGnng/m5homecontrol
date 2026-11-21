@@ -5,7 +5,8 @@ A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 - M5Code-style menu: eight rows per page
 - Two themes: `Flipper` (default) and `Classic`
 - Bitmap font for menu rows, states, and detail values
-- Original Adafruit GFX classic 5x7 English font (M5GFX Font0), displayed at 2x
+- Font trial: BoutiqueBitmap9x9 Regular, with each native dot doubled exactly
+  (typical CJK ink 18×18 px); see [font details](assets/fonts/README.md)
 - Numbered index column, entity name, live state on the right
 - Dynamic number of pages, eight entities per page
 - Configurable page titles, default `PAGE1`, `PAGE2`, ...
@@ -38,13 +39,16 @@ A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 - Menu starts at y = 24
 - Row height = 27 px, eight rows per page
 - Left index column: 24 px
-- Menu text starts 6 px below the row top
+- Index digits are centered by their visible pixels, above the row divider
+- Font cell starts 2 px below the row top; typical Latin ink starts at 6 px
 - Flipper theme: orange rows, dark index text; the selected row and index cell
   use a medium brown background with cream text
 - Classic theme: dark blue selected row with green text
 - Row divider: 1 px solid line in Classic, dotted in Flipper
 - No bottom hint bar
 - Entity state is right-aligned at x = 314
+- Temperature units use `C` / `F` without the degree circle, including sensor
+  and AC AUX values
 - Custom display name overrides the Home Assistant friendly name; empty uses the
   HA friendly name
 - Climate entities show the actual HA mode: `HEAT`, `COOL`, `AUTO`, `DRY`,
@@ -240,6 +244,9 @@ The page is plain: square inputs and buttons, no rounded corners. Empty slots
 and empty pages are kept as configured.
 After saving, the page waits for the device to restart and reloads automatically.
 If reconnection times out, it reports the problem and enables Save again.
+The **Download screenshot** link beside **Update firmware** saves the current
+320×240 display as a BMP. It streams one row at a time using about 1 KB of
+working memory. Capturing does not wake the display or change pages.
 
 ### Web endpoints
 
@@ -250,6 +257,7 @@ If reconnection times out, it reports the problem and enables Save again.
 | `POST /display` | Preview the display with form field `mode=wake`, `dim`, or `off`; settings are not saved |
 | `GET /power` | Current battery and Core charger readings |
 | `GET /diag` | Menu, backlight, LED, and power diagnostics; reading it does not wake the display |
+| `GET /screenshot.bmp` | Stream the current display as `ha-remote-screen.bmp`; does not redraw or wake the display |
 | `GET /update` | Firmware upload form; requires the firmware username/password |
 | `POST /update?size=<bytes>` | Authenticated firmware upload using multipart field `firmware` |
 
@@ -456,6 +464,9 @@ g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
   tools/test_backlight_schedule.cpp -o /tmp/m5-backlight-test
 /tmp/m5-backlight-test
 python3 tools/test_controls.py
+g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
+  src/ui_font_data.cpp tools/test_ui_font.cpp -o /tmp/m5-ui-font-test
+/tmp/m5-ui-font-test
 g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
   tools/test_ha_clock.cpp -o /tmp/m5-ha-clock-test
 /tmp/m5-ha-clock-test

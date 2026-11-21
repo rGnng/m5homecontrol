@@ -695,7 +695,8 @@ document.querySelector('form[action="/save"]').addEventListener('submit', functi
 
     page += "<div class=\"actions bottom\"><button type=\"submit\">Save and reboot</button></div>";
     page += "</form>";
-    page += "<p><a href=\"/update\">Update firmware</a></p>";
+    page += "<p><a href=\"/update\">Update firmware</a> &middot; "
+            "<a href=\"/screenshot.bmp\" download=\"ha-remote-screen.bmp\">Download screenshot</a></p>";
     page += "<p style=\"margin-top:24px;color:#777\">Serial console: send <code>:help</code> at 115200 baud.</p>";
     page += htmlFooter();
 
@@ -981,10 +982,51 @@ static void handleFirmwareComplete() {
     }
 }
 
+static void handleScreenshot() {
+    // Read the panel's pixels without redrawing, navigating, or waking it.
+    constexpr int width = 320, height = 240;
+    constexpr size_t rowBytes = width * 3;  // 960 bytes; already a multiple of 4.
+    constexpr size_t imageBytes = rowBytes * height;
+    uint8_t header[54] = {'B', 'M'};
+    auto littleEndian = [&header](size_t offset, uint32_t value) {
+        for (size_t i=0; i<4; ++i) { header[offset+i] = value & 0xff; value >>= 8; }
+    };
+    littleEndian(2, sizeof(header) + imageBytes);
+    littleEndian(10, sizeof(header));
+    littleEndian(14, 40);  // BITMAPINFOHEADER.
+    littleEndian(18, width);
+    littleEndian(22, height);
+    header[26] = 1;   // One plane.
+    header[28] = 24;  // Uncompressed BGR, 8 bits per channel.
+    littleEndian(34, imageBytes);
+    server.sendHeader("Cache-Control", "no-store");
+    server.sendHeader("Content-Disposition", "attachment; filename=\"ha-remote-screen.bmp\"");
+    server.setContentLength(sizeof(header) + imageBytes);
+    server.send(200, "image/bmp", "");
+    auto client = server.client();
+    if (client.write(header, sizeof(header)) != sizeof(header)) {
+        client.stop();
+        return;
+    }
+    uint8_t row[rowBytes];
+    // BMP stores the bottom row first and reverses RGB to BGR.
+    for (int y=height-1; y>=0; --y) {
+        M5.Display.readRectRGB(0, y, width, 1, row);
+        for (size_t x=0; x<rowBytes; x+=3) {
+            uint8_t red = row[x]; row[x] = row[x+2]; row[x+2] = red;
+        }
+        if (client.write(row, sizeof(row)) != sizeof(row)) {
+            client.stop();
+            return;
+        }
+    }
+}
+
 static void startWebServer() {
     if (!g_routesReady) {
         server.on("/", HTTP_GET, handleRoot);
         server.on("/save", HTTP_POST, handleSave);
+        server.on("/screenshot.bmp", HTTP_GET, handleScreenshot);
         server.on("/power", HTTP_GET, []() {
             server.sendHeader("Cache-Control", "no-store");
             server.send(200, "text/plain", powerSummary());

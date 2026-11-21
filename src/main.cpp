@@ -21,6 +21,9 @@
 #include "ha_client.h"
 #include "keypad_controls.h"
 #include "sfx_data.h"
+#include "ui_font.h"
+#include "ui_font_data.h"
+#include "utf8_text.h"
 
 // ---------------------------------------------------------------------
 //  Theme
@@ -125,7 +128,8 @@ static constexpr int SB_H  = 24;
 
 static constexpr int MENU_Y = 24;
 static constexpr int MENU_ROW_H = 27;
-static constexpr int MENU_TEXT_Y = 6;
+static constexpr int MENU_TEXT_Y = (MENU_ROW_H - UI_FONT_HEIGHT) / 2;
+static constexpr int STATUS_TEXT_Y = (SB_H - UI_FONT_HEIGHT) / 2;
 
 // ---------------------------------------------------------------------
 //  State
@@ -339,10 +343,15 @@ static uint8_t g_backlightPercent = 0;
 // ---------------------------------------------------------------------
 //  Text helpers
 // ---------------------------------------------------------------------
+static void selectUiFont(LovyanGFX& g, uint8_t size) {
+    g.setFont(uiFont());
+    g.setTextSize(size / 2.0f);
+}
+
 static void txt(LovyanGFX& g, const char* s, int x, int y,
                 uint16_t color, uint8_t size = 2) {
     g.setTextDatum(TL_DATUM);
-    g.setTextSize(size);
+    selectUiFont(g, size);
     g.setTextColor(color);
     g.drawString(s, x, y);
 }
@@ -350,7 +359,7 @@ static void txt(LovyanGFX& g, const char* s, int x, int y,
 static void txtC(LovyanGFX& g, const char* s, int x, int y,
                  uint16_t color, uint8_t size = 2) {
     g.setTextDatum(MC_DATUM);
-    g.setTextSize(size);
+    selectUiFont(g, size);
     g.setTextColor(color);
     g.drawString(s, x, y);
 }
@@ -358,7 +367,7 @@ static void txtC(LovyanGFX& g, const char* s, int x, int y,
 static void txtR(LovyanGFX& g, const char* s, int x, int y,
                  uint16_t color, uint8_t size = 2) {
     g.setTextDatum(TR_DATUM);
-    g.setTextSize(size);
+    selectUiFont(g, size);
     g.setTextColor(color);
     g.drawString(s, x, y);
 }
@@ -367,27 +376,25 @@ static void txtR(LovyanGFX& g, const char* s, int x, int y,
 static String fitText(LovyanGFX& g, const String& in, int maxWidth,
                       uint8_t size) {
     if (in.isEmpty() || maxWidth <= 0) return String("");
-    g.setTextSize(size);
-    if (g.textWidth(in.c_str()) <= maxWidth) return in;
-
-    String out = in;
-    while (out.length() > 1) {
-        String probe = out + "~";
-        if (g.textWidth(probe.c_str()) <= maxWidth) break;
-        out.remove(out.length() - 1);
+    selectUiFont(g, size);
+    String out = ui_text::forFont(in);
+    if (g.textWidth(out.c_str()) <= maxWidth) return out;
+    if (g.textWidth("~") > maxWidth) return String("");
+    while (!out.isEmpty()) {
+        out.remove(ui_text::previousBoundary(out.c_str(), out.length()));
+        if (g.textWidth((out + "~").c_str()) <= maxWidth) break;
     }
     return out + "~";
 }
 
 static String shorten(const String& in, size_t maxChars) {
-    if (in.length() <= maxChars) return in;
-    if (maxChars == 0) return String("");
-    return in.substring(0, maxChars - 1) + "~";
+    return ui_text::shorten(in, maxChars);
 }
 
 static String upperText(const String& in) {
     String s = in;
-    s.toUpperCase();
+    for (size_t i=0; i<s.length(); ++i)
+        if (s[i]>='a' && s[i]<='z') s[i]=s[i]-'a'+'A';
     return s;
 }
 
@@ -395,6 +402,12 @@ static String tempText(float value) {
     char buf[12];
     snprintf(buf, sizeof(buf), "%.1fC", value);
     return String(buf);
+}
+
+static String displayUnit(const String& unit) {
+    if (unit == "°C" || unit == "℃") return String("C");
+    if (unit == "°F" || unit == "℉") return String("F");
+    return unit;
 }
 
 static bool validTemp(float value) {
@@ -654,7 +667,7 @@ static String entityStateText(const EntityState& e) {
                 return String("CLOSED");
             }
             String s = e.state;
-            if (!e.unit.isEmpty()) s += " " + e.unit;
+            if (!e.unit.isEmpty()) s += " " + displayUnit(e.unit);
             return s;
         }
         case EntityType::Cover:
@@ -764,7 +777,7 @@ static void drawStatusTitle(LovyanGFX& g) {
         if (title.isEmpty()) title = "PAGE" + String(g_page + 1);
     }
     title = fitText(g, title, 86, 2);
-    txt(g, title.c_str(), 6, 5, g_theme.barText, 2);
+    txt(g, title.c_str(), 6, STATUS_TEXT_Y, g_theme.barText, 2);
 }
 
 static void drawStatusCenter(LovyanGFX& g) {
@@ -825,10 +838,14 @@ static void paintListRow(LovyanGFX& g, int slot, const RowPaint& row,
             g.drawFastVLine(24, y, MENU_ROW_H, g_theme.numberLine);
         }
         char number[2] = { char('1' + slot), 0 };
-        txt(g, number, 6, y + MENU_TEXT_Y, row.numberColor, 2);
+        const auto ink = uiFontInkBounds(number[0]);
+        // Center visible pixels; leave the bottom divider outside the content.
+        const int numberX = (24 - ink.width) / 2 - ink.x;
+        const int numberY = (MENU_ROW_H - 1 - ink.height) / 2 - ink.y;
+        txt(g, number, numberX, y + numberY, row.numberColor, 2);
         if (slot < GRID_SLOTS - 1) drawThemeDivider(g, y + MENU_ROW_H - 1);
     } else {
-        g.setTextSize(2);
+        selectUiFont(g, 2);
         // Clear both old and new bounds before drawing either field. A value
         // growing wider can also shorten a long label beside it.
         if (labelChanged) {
@@ -997,7 +1014,7 @@ static String acAuxText(const EntityState& e) {
             return upperText(e.aux.state);
         case EntityType::Sensor: {
             String value = e.aux.state;
-            if (!e.aux.unit.isEmpty()) value += " " + e.aux.unit;
+            if (!e.aux.unit.isEmpty()) value += " " + displayUnit(e.aux.unit);
             return value;
         }
         default:
@@ -1086,7 +1103,7 @@ static void drawAcDetail(LovyanGFX& g, const EntityState& e, bool forceFull = tr
 //  Render
 // ---------------------------------------------------------------------
 static void renderAll(LovyanGFX& g) {
-    g.setFont(&fonts::Font0);
+    selectUiFont(g, 2);
     // Clear to black before repainting the final theme colors.
     g.fillScreen(TFT_BLACK);
     drawStatusBar(g);

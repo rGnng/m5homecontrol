@@ -9,6 +9,7 @@
 
 #include "app_config.h"
 #include "ha_clock.h"
+#include "utf8_text.h"
 
 static WebSocketsClient ws;
 static bool g_wsStarted = false;
@@ -53,13 +54,8 @@ static HaCommandCallback g_commandCb = nullptr;
 // ---------------------------------------------------------------------
 //  Helpers
 // ---------------------------------------------------------------------
-String asciiText(const String& text) {
-    String out;
-    out.reserve(text.length());
-    for (size_t i = 0; i < text.length(); i++) {
-        unsigned char c = (unsigned char)text[i];
-        if (c >= 32 && c < 127) out += (char)c;
-    }
+String displayText(const String& text) {
+    String out = ui_text::clean(text);
     out.trim();
     return out;
 }
@@ -153,9 +149,13 @@ static bool parseState(EntityState& e, JsonVariantConst obj) {
 
     e.name = attrs["friendly_name"].as<String>();
     if (e.name.isEmpty()) e.name = defaultNameFromId(e.id);
-    e.name = asciiText(e.name);
+    e.name = displayText(e.name);
 
-    e.unit = asciiText(attrs["unit_of_measurement"].as<String>());
+    String unit = attrs["unit_of_measurement"].as<String>();
+    // Preserve the requested compact temperature units.
+    if (unit == "℃") unit = "C";
+    else if (unit == "℉") unit = "F";
+    e.unit = displayText(unit);
     e.brightness = attrs["brightness"] | -1;
     e.brightnessAdjustable = false;
     if (e.type == EntityType::Light) {
@@ -195,7 +195,7 @@ static bool parseState(EntityState& e, JsonVariantConst obj) {
 
     e.detail = attrs["media_title"].as<String>();
     if (e.detail.isEmpty()) e.detail = attrs["device_class"].as<String>();
-    e.detail = asciiText(e.detail);
+    e.detail = displayText(e.detail);
 
     e.available = (e.state != "unavailable");
     deriveOn(e);

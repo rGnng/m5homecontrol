@@ -39,6 +39,7 @@ public:
 prefix = r'''
 #include "ha_client.h"
 #include "keypad_controls.h"
+#include "utf8_text.h"
 #include <ArduinoJson.h>
 void convertFromJson(JsonVariantConst source, String& target){target=source.as<std::string>();}
 #include <cassert>
@@ -112,6 +113,20 @@ static EntityState parse(const char* id,const char* json){
     assert(parseState(result,document.as<JsonVariantConst>()));return result;
 }
 int main(){
+    reset();entity.id="sensor.temperature";entity.type=EntityType::Sensor;
+    entity.available=true;entity.state="23.4";
+    for(const char* unit: {"°C","℃"}){
+        entity.unit=unit;assert(entityStateText(entity)=="23.4 C");
+    }
+    for(const char* unit: {"°F","℉"}){
+        entity.unit=unit;assert(entityStateText(entity)=="23.4 F");
+    }
+    entity.unit="%";assert(entityStateText(entity)=="23.4 %");
+    entity.aux.id="sensor.aux_temperature";entity.aux.available=true;
+    entity.aux.type=EntityType::Sensor;entity.aux.state="22.0";entity.aux.unit="°C";
+    assert(acAuxText(entity)=="22.0 C");
+    assert(parse("sensor.temperature",R"({"state":"23.4","attributes":{"unit_of_measurement":"℃"}})").unit=="C");
+    assert(parse("sensor.temperature",R"({"state":"23.4","attributes":{"unit_of_measurement":"℉"}})").unit=="F");
     assert(parse("light.test",R"({"state":"off","attributes":{"supported_color_modes":["brightness"],"brightness":null}})").brightnessAdjustable);
     assert(!parse("light.test",R"({"state":"on","attributes":{"supported_color_modes":["onoff"],"brightness":128}})").brightnessAdjustable);
     assert(parse("light.test",R"({"state":"on","attributes":{"supported_color_modes":["hs"]}})").brightnessAdjustable);
@@ -185,10 +200,11 @@ int main(){
 client = (ROOT / 'src/ha_client.cpp').read_text()
 original_source=source
 source=client
-client_functions=''.join(function(signature) for signature in ['String asciiText(', 'static void deriveOn(', 'static String joinArray(', 'static bool parseState('])
+client_functions=''.join(function(signature) for signature in ['String displayText(', 'static void deriveOn(', 'static String joinArray(', 'static bool parseState('])
 source=original_source
 body = prefix + client_functions + function('static bool validTemp(')
 body += function('static String upperText(') + function('static String tempText(')
+body += function('static String displayUnit(') + function('static String acAuxText(')
 body += function('static int lightPercent(') + function('static String entityStateText(')
 body += function('static void acAdjust(') + function('static void acTempAction(')
 start = source.index('template<class Light> static bool adjustLightBrightness(')

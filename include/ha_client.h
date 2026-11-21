@@ -66,7 +66,7 @@ typedef void (*HaCommandCallback)();
 EntityType entityTypeFromId(const String& id);
 String defaultNameFromId(const String& id);
 String entityDomain(const String& id);
-String asciiText(const String& text);
+String displayText(const String& text);
 
 void haBegin();
 void haLoop();

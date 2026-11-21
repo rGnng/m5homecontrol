@@ -1,0 +1,14 @@
+{
+  "family": "Remote Dot 2x",
+  "source_family": "BoutiqueBitmap9x9 1.6 R",
+  "file": "BoutiqueBitmap9x9_1.6.ttf",
+  "sha256": "ab179f9a6ccbc6cb433ff1bbb29e1d1dbfce72db8677b02f53c650ea32672ab3",
+  "weight": "Regular",
+  "native_spacing_ppem": 10,
+  "native_ink_grid": "9x9",
+  "scale": 2,
+  "cell_width": 20,
+  "cell_height": 22,
+  "baseline": 16,
+  "source_url": "https://github.com/scott0107000/BoutiqueBitmap9x9"
+}
