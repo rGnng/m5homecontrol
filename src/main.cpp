@@ -15,6 +15,7 @@
 #include <utility/led/LED_Strip_Class.hpp>
 
 #include "app_config.h"
+#include "connected_power.h"
 #include "backlight_schedule.h"
 #include "power_status.h"
 #include "side_led_bus.h"
@@ -176,7 +177,20 @@ static EntityState& cardAt(int slot) {
 static int g_refreshIndex = -1;
 static int g_refreshFail = 0;
 static uint32_t g_nextRefresh = 0;
+static bool g_refreshPending[MAX_ENTITIES] = {};
+static bool g_fullRefreshStarted = false;
+static uint32_t g_lastFullRefresh = 0;
+static uint32_t g_restRefreshReads = 0, g_fullRefreshes = 0;
 static wl_status_t g_prevWifiLink = WL_IDLE_STATUS;
+
+String refreshStatus() {
+    unsigned pending = 0;
+    for (int i = 0; i < g_config.entityCount; ++i) pending += g_refreshPending[i];
+    return "rest_refresh_reads=" + String(g_restRefreshReads) +
+           " rest_full_refreshes=" + String(g_fullRefreshes) +
+           " rest_refresh_pending=" + String(pending) +
+           " rest_full_interval_s=" + String(haStateUpdatesReady() ? 1800 : 30);
+}
 
 static bool g_cmdMode = false;
 static String g_cmdLine;
@@ -209,7 +223,8 @@ static uint8_t keypadReadByte() {
 
 static char keypadPoll() {
     uint32_t now = millis();
-    if (now - g_lastKeyPoll < 20) return 0;
+    uint32_t interval = connectedPowerIdle() ? 100 : 20;
+    if (now - g_lastKeyPoll < interval) return 0;
     g_lastKeyPoll = now;
 
     uint8_t raw = keypadReadByte();
@@ -325,19 +340,43 @@ String commandLedsStatus() {
     return text;
 }
 
-static void sfxArrow() {
-    M5.Speaker.playWav(sfx_arrow, sfx_arrow_len, 1, -1, true);
+static uint32_t g_lastSoundAt = 0;
+static bool g_audioQuiet = false;
+
+static void quietAudio() {
+    M5.Speaker.end();
+    if (M5.getBoard() == m5::board_t::board_M5Stack) {
+        dacDisable(25);
+        pinMode(25, OUTPUT);
+        digitalWrite(25, LOW);
+    }
+    g_audioQuiet = true;
 }
 
-static void sfxSelect() {
-    M5.Speaker.playWav(sfx_select, sfx_select_len, 1, -1, true);
+static void playUiSound(const uint8_t* data, size_t length) {
+    setConnectedPowerIdle(false);
+    if (M5.Speaker.playWav(data, length, 1, -1, true)) {
+        g_lastSoundAt = millis();
+        g_audioQuiet = false;
+    }
 }
+
+static void sfxArrow() { playUiSound(sfx_arrow, sfx_arrow_len); }
+static void sfxSelect() { playUiSound(sfx_select, sfx_select_len); }
 
 static uint32_t g_lastActivity = 0;
 static BacklightPhase g_backlightPhase = BacklightPhase::Normal;
 static int g_backlightOverride = -1;
 static int g_appliedBrightness = -1;
 static uint8_t g_backlightPercent = 0;
+
+static void connectedPowerTick() {
+    if (!g_audioQuiet && !M5.Speaker.isPlaying() && millis() - g_lastSoundAt >= 1000) quietAudio();
+    bool idle = (millis() - g_lastActivity >= 15000 || g_backlightPhase != BacklightPhase::Normal)
+                && !M5.Speaker.isPlaying();
+    setConnectedPowerIdle(idle);
+    setPowerPollingIdle(idle);
+}
 
 // ---------------------------------------------------------------------
 //  Text helpers
@@ -431,6 +470,8 @@ static void renderInitial();
 static void scheduleTick(bool explicitInput = false);
 
 static void noteActivity() {
+    setConnectedPowerIdle(false);
+    setPowerPollingIdle(false);
     g_lastActivity = millis();
     g_backlightOverride = -1;
     scheduleTick(true);
@@ -443,12 +484,13 @@ static bool inTimeRange(int now, int start, int end) {
 }
 
 static void applyBacklightPlan(BacklightPlan plan) {
+    bool waking = g_backlightPhase == BacklightPhase::Off && plan.phase != BacklightPhase::Off;
     // Preserve the current palette while off; repaint it before lighting the
     // screen on wake. Entering dim mode reduces the backlight before repaint.
     bool dimTheme = plan.phase == BacklightPhase::Off ? g_dimTheme
                                                      : plan.phase == BacklightPhase::Dim;
-    if (dimTheme != g_dimTheme) {
-        if (dimTheme) applyBacklightPercent(plan.brightness);
+    if (waking || dimTheme != g_dimTheme) {
+        if (dimTheme || waking) applyBacklightPercent(waking ? 0 : plan.brightness);
         g_dimTheme = dimTheme;
         applyTheme();
         renderInitial();
@@ -506,7 +548,11 @@ String backlightStatus() {
                          : (g_backlightPhase == BacklightPhase::Off ? "off" : "normal");
     return "backlight=" + String(state) + " backlight_pwm=" + String(g_appliedBrightness) +
            " dim_theme=" + String((int)g_dimTheme) +
-           " display_override=" + String(g_backlightOverride);
+           " display_override=" + String(g_backlightOverride) +
+           " lcd_sleep=0" +
+           " audio_quiet=" + String(g_audioQuiet ? 1 : 0) +
+           " power_sample_interval_ms=" + String(powerSampleIntervalMs()) +
+           " keypad_poll_ms=" + String(connectedPowerIdle() ? 100 : 20);
 }
 
 // ---------------------------------------------------------------------
@@ -1197,6 +1243,7 @@ static void redrawStatusRegions() {
 }
 
 static void renderDirty() {
+    if (g_backlightPhase == BacklightPhase::Off) return;  // Wake repaints cached state.
     if (g_detail) {
         bool detailDirty = (g_detailGlobal >= 0 && g_dirty[g_detailGlobal]);
         for (int i = 0; i < MAX_ENTITIES; i++) g_dirty[i] = false;
@@ -1236,7 +1283,6 @@ static void onHaState(const EntityState& state) {
             if (i / GRID_SLOTS == g_page || (g_detail && i == g_detailGlobal)) {
                 g_dirty[i] = true;
             }
-            return;
         }
         if (!card.aux.id.isEmpty() && card.aux.id == state.id) {
             card.aux.revision = state.revision;
@@ -1252,7 +1298,7 @@ static void onHaState(const EntityState& state) {
             if (i / GRID_SLOTS == g_page || (g_detail && i == g_detailGlobal)) {
                 g_dirty[i] = true;
             }
-            return;
+            continue;
         }
     }
 }
@@ -1268,6 +1314,7 @@ static void onHaAuth() {
     // Re-sync through REST after a successful WebSocket subscription.
     g_refreshIndex = -1;
     g_nextRefresh = 0;
+    g_fullRefreshStarted = false;
 }
 
 // ---------------------------------------------------------------------
@@ -1276,6 +1323,13 @@ static void onHaAuth() {
 static void scheduleRefresh() {
     g_refreshIndex = -1;
     g_nextRefresh = millis() + 1500;
+}
+
+static void requestEntityRefresh(const String& id) {
+    for (int i = 0; i < g_config.entityCount; ++i) {
+        if (g_cards[i].id == id || g_cards[i].aux.id == id) g_refreshPending[i] = true;
+    }
+    if (g_refreshIndex < 0) g_nextRefresh = millis() + 1500;
 }
 
 static void goBack() {
@@ -1336,7 +1390,9 @@ static EntityState& selectedEntity() {
 
 static bool callService(const String& domain, const String& service,
                         const String& entityId, const String& extra = "") {
-    return haCallService(domain, service, entityId, extra);
+    bool ok = haCallService(domain, service, entityId, extra);
+    if (ok) requestEntityRefresh(entityId);
+    return ok;
 }
 
 static void acMove(int delta) {
@@ -1801,23 +1857,37 @@ static void handleSerialInput() {
 static void refreshTick() {
     if (!haConfigured() || WiFi.status() != WL_CONNECTED) return;
 
+    uint32_t fullInterval = haStateUpdatesReady() ? 1800000 : 30000;
+    if (!g_fullRefreshStarted || millis() - g_lastFullRefresh >= fullInterval) {
+        for (int i = 0; i < g_config.entityCount; ++i) g_refreshPending[i] = !g_cards[i].id.isEmpty();
+        g_fullRefreshStarted = true;
+        g_lastFullRefresh = millis();
+        ++g_fullRefreshes;
+    }
+
     if (g_refreshIndex < 0) {
         if ((int32_t)(millis() - g_nextRefresh) < 0) return;
+        bool pending = false;
+        for (int i = 0; i < g_config.entityCount; ++i) pending |= g_refreshPending[i];
+        if (!pending) return;
         g_refreshIndex = 0;
         g_refreshFail = 0;
     }
 
+    while (g_refreshIndex < g_config.entityCount && !g_refreshPending[g_refreshIndex]) ++g_refreshIndex;
     if (g_refreshIndex >= g_config.entityCount) {
         bool anyFail = (g_refreshFail > 0);
         g_refreshIndex = -1;
         g_refreshFail = 0;
         // Retry failed servers quickly, but do not hammer a healthy one.
-        g_nextRefresh = millis() + (anyFail ? 15000 : 300000);
+        g_nextRefresh = millis() + (anyFail ? 15000 : 0);
         return;
     }
 
     int index = g_refreshIndex++;
+    g_refreshPending[index] = false;
     if (index < g_config.entityCount && !g_cards[index].id.isEmpty()) {
+        ++g_restRefreshReads;
         bool ok = haFetchState(g_cards[index]);
         if (ok) {
             if (!g_cards[index].customName.isEmpty()) {
@@ -1827,7 +1897,13 @@ static void refreshTick() {
                 uint32_t revision = g_cards[index].aux.revision;
                 EntityState auxState;
                 auxState.id = g_cards[index].aux.id;
-                if (haFetchState(auxState) && g_cards[index].aux.revision == revision) {
+                ++g_restRefreshReads;
+                bool auxOk = haFetchState(auxState);
+                if (!auxOk) {
+                    g_refreshPending[index] = true;
+                    ++g_refreshFail;
+                }
+                if (auxOk && g_cards[index].aux.revision == revision) {
                     g_cards[index].aux.name = auxState.name;
                     g_cards[index].aux.state = auxState.state;
                     g_cards[index].aux.unit = auxState.unit;
@@ -1844,15 +1920,15 @@ static void refreshTick() {
                 g_dirty[index] = true;
             }
         } else {
+            g_refreshPending[index] = true;
             g_refreshFail++;
-            // Abort this sweep after three timeouts instead of blocking the
-            // UI for every entity. It will retry forever every 15 seconds.
-            if (g_refreshFail >= 3) {
-                g_refreshIndex = -1;
-                g_refreshFail = 0;
-                g_nextRefresh = millis() + 15000;
-            }
         }
+    }
+    // Keep failed and unprocessed rows pending, with bounded retry traffic.
+    if (g_refreshFail >= 3) {
+        g_refreshIndex = -1;
+        g_refreshFail = 0;
+        g_nextRefresh = millis() + 15000;
     }
 }
 
@@ -1902,10 +1978,12 @@ void setup() {
     Serial.println("[boot] serial ready");
 
     configLoad();
+    setConnectedPowerIdle(false);
     applyTheme();
     auto cfg = M5.config();
     M5.begin(cfg);
     M5.Speaker.setVolume(96);
+    quietAudio();
     keypadInit();
     initCommandLeds();
 
@@ -1977,6 +2055,7 @@ void loop() {
         // Wi-Fi is back: resync every page and let HA reconnect.
         g_nextRefresh = 0;
         g_refreshIndex = -1;
+        g_fullRefreshStarted = false;
         g_statusLinkDirty = true;
     }
     g_prevWifiLink = wifiNow;
@@ -2002,6 +2081,7 @@ void loop() {
 
     renderDirty();
     refreshTick();
+    connectedPowerTick();
 
     static uint32_t lastBar = 0;
     if (millis() - lastBar > 500) {
@@ -2025,5 +2105,5 @@ void loop() {
         }
     }
 
-    delay(10);
+    delay(connectedPowerIdle() ? 20 : 10);
 }

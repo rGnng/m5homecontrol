@@ -6,8 +6,10 @@
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <Update.h>
+#include <esp_system.h>
 
 #include "ha_client.h"
+#include "connected_power.h"
 #include "html_stream.h"
 #include "power_status.h"
 
@@ -308,7 +310,7 @@ static String voltageText(int millivolts) {
 }
 
 static String powerSummary() {
-    PowerStatus power = readPowerStatus();
+    PowerStatus power = readPowerStatus(true);
     String text = "Battery: ";
     text += power.batteryPercent < 0 ? String("Unavailable")
                                     : String(power.batteryPercent) + "% (approximate)";
@@ -325,6 +327,7 @@ static String powerSummary() {
 }
 
 static void handleRoot() {
+    ConnectedPowerWork powerWork;
     static String cachedOptions;
     static uint32_t cachedAt = 0;
     bool optionsLoaded = false;
@@ -738,6 +741,7 @@ static void sendSaveError(const String& message) {
 }
 
 static void handleSave() {
+    ConnectedPowerWork powerWork;
     String ssid = server.arg("ssid");
     String pass = server.arg("pass");
     String hostname = sanitizeHostname(server.arg("host"));
@@ -935,12 +939,27 @@ static void failFirmwareUpload(const String& error) {
     Serial.printf("[web-ota] %s\n", error.c_str());
 }
 
+static bool g_firmwarePowerWork = false;
+
+static void finishFirmwarePowerWork() {
+    if (!g_firmwarePowerWork) return;
+    g_firmwarePowerWork = false;
+    endConnectedPowerWork();
+}
+
 static void handleFirmwareUpload() {
     // Upload callbacks run before the final POST handler. Authenticate here
     // as well so rejected requests never write to flash.
     if (!firmwareAuthenticated()) return;
     HTTPUpload& upload = server.upload();
     if (upload.status == UPLOAD_FILE_START) {
+        // WebServer processes the upload in this main-loop invocation. Keep
+        // modem sleep disabled until completion, including between chunks.
+        setConnectedPowerIdle(false);
+        if (!g_firmwarePowerWork) {
+            beginConnectedPowerWork();
+            g_firmwarePowerWork = true;
+        }
         if (g_firmwareUpload.ownsUpdate || g_firmwareUpload.fileEnded) {
             failFirmwareUpload("Upload exactly one firmware file.");
             return;
@@ -975,10 +994,12 @@ static void handleFirmwareUpload() {
     } else if (upload.status == UPLOAD_FILE_ABORTED) {
         failFirmwareUpload("Upload interrupted.");
         g_firmwareUpload = WebFirmwareUpload();
+        finishFirmwarePowerWork();
     }
 }
 
 static void handleFirmwareComplete() {
+    finishFirmwarePowerWork();
     if (!firmwareAuthenticated()) {
         server.requestAuthentication(BASIC_AUTH, "Firmware update");
         return;
@@ -1007,7 +1028,8 @@ static void handleFirmwareComplete() {
 }
 
 static void handleScreenshot() {
-    // Read the panel's pixels without redrawing, navigating, or waking it.
+    ConnectedPowerWork powerWork;
+    // Read cached panel pixels without navigating or lighting the backlight.
     constexpr int width = 320, height = 240;
     constexpr size_t rowBytes = width * 3;  // 960 bytes; already a multiple of 4.
     constexpr size_t imageBytes = rowBytes * height;
@@ -1069,10 +1091,15 @@ static void startWebServer() {
             PowerStatus power = readPowerStatus();
             String text = "board=" + String((int)M5.getBoard());
             text += " uptime_ms=" + String(millis());
+            text += " reset_reason=" + String(static_cast<int>(esp_reset_reason()));
+            text += " free_heap=" + String(ESP.getFreeHeap());
+            text += " min_free_heap=" + String(ESP.getMinFreeHeap());
             text += " " + menuStatus();
             text += " " + backlightStatus();
+            text += " " + refreshStatus();
             text += " " + haClockStatus();
             text += " " + haConnectionStatus();
+            text += " " + connectedPowerStatus();
             text += " " + commandLedsStatus();
             text += " charging=" + String(chargeStateName(power.charging));
             text += " core_charging=" + String(chargeStateName(power.coreCharging));
@@ -1135,7 +1162,7 @@ void networkBegin() {
     }
 
     WiFi.mode(WIFI_STA);
-    WiFi.setSleep(false);
+    WiFi.setSleep(true);  // WIFI_PS_MIN_MODEM: retain association and HA connection.
     WiFi.setHostname(g_config.hostname.c_str());
     WiFi.begin(g_config.ssid.c_str(), g_config.pass.c_str());
     g_apMode = false;

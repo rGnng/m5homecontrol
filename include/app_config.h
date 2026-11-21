@@ -61,6 +61,7 @@ String networkIp();
 String commandLedsStatus();
 String menuStatus();
 String backlightStatus();
+String refreshStatus();
 bool setDisplayMode(const String& mode);
 
 void appConfigHandleCommand(const String& line);

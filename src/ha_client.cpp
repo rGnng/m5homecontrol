@@ -13,6 +13,8 @@
 #include <freertos/task.h>
 
 #include "app_config.h"
+#include "connected_power.h"
+#include "deadline_stream.h"
 #include "ha_clock.h"
 #include "utf8_text.h"
 
@@ -22,6 +24,9 @@ static bool g_wsAuthed = false;
 static uint32_t g_wsMessageId = 1;
 static uint32_t g_wsClockId = 0;
 static uint32_t g_clockRetryAt = 0;
+static uint32_t g_wsStateId = 0, g_stateRetryAt = 0;
+static bool g_stateSubscribed = false;
+static unsigned g_watchedEntities = 0;
 static HaClock g_haClock;
 static String g_haTimeZone;
 
@@ -34,6 +39,7 @@ struct HaLinkStats {
     int lastCommandStatus = 0;
     uint32_t commandFailures = 0, lastCommandMs = 0;
     uint32_t stateSequence = 0;
+    uint32_t stateEvents = 0, ignoredStateEvents = 0, subscriptionErrors = 0;
 };
 static HaLinkStats g_linkStats;
 
@@ -81,6 +87,11 @@ String haConnectionStatus() {
     text += " ha_command_failures=" + String(g_linkStats.commandFailures);
     text += " ha_last_command_status=" + String(g_linkStats.lastCommandStatus);
     text += " ha_last_command_ms=" + String(g_linkStats.lastCommandMs);
+    text += " ws_state_ready=" + String(haStateUpdatesReady() ? 1 : 0);
+    text += " ws_watched_entities=" + String(g_watchedEntities);
+    text += " ws_state_events=" + String(g_linkStats.stateEvents);
+    text += " ws_ignored_events=" + String(g_linkStats.ignoredStateEvents);
+    text += " ws_subscription_errors=" + String(g_linkStats.subscriptionErrors);
     return text;
 }
 
@@ -281,6 +292,7 @@ static void httpWorkerTask(void*) {
 }
 
 static bool runHttpWork(std::function<bool()> operation) {
+    ConnectedPowerWork powerWork;
     if (g_httpWaiting) return false;
     if (!g_httpQueue) {
         g_httpQueue = xQueueCreate(1, sizeof(HttpWork*));
@@ -422,8 +434,9 @@ static bool fetchEntityOptionsBlocking(String& optionsHtml, int maxOptions) {
     filter[0]["attributes"]["friendly_name"] = true;
 
     JsonDocument doc;
+    DeadlineStream<WiFiClient> input(http.getStream(), 15000);
     DeserializationError err = deserializeJson(
-        doc, http.getStream(), DeserializationOption::Filter(filter));
+        doc, input, DeserializationOption::Filter(filter));
     http.end();
 
     if (err) {
@@ -512,13 +525,39 @@ static bool syncClock(JsonVariantConst result) {
     return true;
 }
 
+static bool stateEntityConfigured(const String& id) {
+    if (id.isEmpty()) return false;
+    for (int i = 0; i < g_config.entityCount; ++i) {
+        if (g_config.entities[i] == id || g_config.auxEntities[i] == id) return true;
+    }
+    return false;
+}
+
 static void wsSubscribe() {
     JsonDocument doc;
-    doc["id"] = g_wsMessageId++;
-    doc["type"] = "subscribe_events";
-    doc["event_type"] = "state_changed";
+    g_stateSubscribed = false;
+    g_wsStateId = 0;
+    doc["type"] = "subscribe_trigger";
+    doc["trigger"]["platform"] = "state";
+    JsonArray ids = doc["trigger"]["entity_id"].to<JsonArray>();
+    for (int i = 0; i < g_config.entityCount; ++i) {
+        for (const String* id : {&g_config.entities[i], &g_config.auxEntities[i]}) {
+            if (id->isEmpty()) continue;
+            bool duplicate = false;
+            for (JsonVariantConst existing : ids) {
+                if (existing.as<String>() == *id) { duplicate = true; break; }
+            }
+            if (!duplicate) ids.add(*id);
+        }
+    }
+    g_watchedEntities = ids.size();
+    // An empty filter must never turn into an all-HA subscription.
+    if (!g_watchedEntities) { g_stateSubscribed = true; return; }
+    g_wsStateId = g_wsMessageId++;
+    doc["id"] = g_wsStateId;
+    g_stateRetryAt = millis() + 30000;
     wsSendJson(doc);
-    Serial.println("[ha] subscribed to state_changed");
+    Serial.printf("[ha] subscribing to %u configured entities\n", g_watchedEntities);
 }
 
 static void wsHandleText(const uint8_t* payload, size_t length) {
@@ -549,6 +588,8 @@ static void wsHandleText(const uint8_t* payload, size_t length) {
 
     if (type == "auth_invalid") {
         g_wsAuthed = false;
+        g_stateSubscribed = false;
+        g_wsStateId = 0;
         ++g_linkStats.errors;
         notifyStatus(false);
         Serial.println("[ha] auth invalid, will retry");
@@ -571,18 +612,36 @@ static void wsHandleText(const uint8_t* payload, size_t length) {
         return;
     }
 
-    if (type == "event") {
-        String eventType = doc["event"]["event_type"].as<String>();
-        if (eventType != "state_changed") return;
+    if (g_wsStateId && id == g_wsStateId && type == "result") {
+        g_stateSubscribed = doc["success"] | false;
+        if (!g_stateSubscribed) {
+            ++g_linkStats.subscriptionErrors;
+            g_wsStateId = 0;
+            g_stateRetryAt = millis() + 30000;
+            Serial.println("[ha] state subscription rejected; REST fallback and retry enabled");
+        }
+        return;
+    }
 
-        String entityId = doc["event"]["data"]["entity_id"].as<String>();
-        JsonVariantConst newState = doc["event"]["data"]["new_state"];
-        if (entityId.isEmpty()) return;
+    if (type == "event") {
+        JsonVariantConst trigger = doc["event"]["variables"]["trigger"];
+        String entityId = trigger["entity_id"].as<String>();
+        if (!g_wsAuthed || !g_stateSubscribed || !g_wsStateId || id != g_wsStateId ||
+            !stateEntityConfigured(entityId)) {
+            ++g_linkStats.ignoredStateEvents;
+            return;
+        }
+        JsonVariantConst newState = trigger["to_state"];
+        if (!newState.isNull() && newState["entity_id"].as<String>() != entityId) {
+            ++g_linkStats.ignoredStateEvents;
+            return;
+        }
 
         EntityState state;
         state.id = entityId;
         parseState(state, newState);
         state.revision = ++g_linkStats.stateSequence;
+        ++g_linkStats.stateEvents;
         if (g_stateCb) g_stateCb(state);
     }
 }
@@ -592,6 +651,8 @@ static void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
         case WStype_CONNECTED:
             g_wsAuthed = false;
             g_wsClockId = 0;
+            g_wsStateId = 0;
+            g_stateSubscribed = false;
             ++g_linkStats.connections;
             g_linkStats.lastConnectMs = millis();
             notifyStatus(false);
@@ -602,6 +663,8 @@ static void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
         case WStype_DISCONNECTED:
             g_wsAuthed = false;
             g_wsClockId = 0;
+            g_wsStateId = 0;
+            g_stateSubscribed = false;
             ++g_linkStats.disconnects;
             g_linkStats.lastDisconnectMs = millis();
             g_linkStats.lastDisconnectTime = haLocalTimeText();
@@ -668,6 +731,16 @@ void haLoop() {
         g_linkStats.lastLoopMs = now;
         ws.loop();
     }
+    if (g_wsAuthed && !g_stateSubscribed && (int32_t)(millis() - g_stateRetryAt) >= 0) {
+        if (g_wsStateId) {
+            JsonDocument doc;
+            doc["id"] = g_wsMessageId++;
+            doc["type"] = "unsubscribe_events";
+            doc["subscription"] = g_wsStateId;
+            wsSendJson(doc);
+        }
+        wsSubscribe();
+    }
     if (g_wsAuthed && (int32_t)(millis() - g_clockRetryAt) >= 0) {
         if (g_wsClockId) {
             JsonDocument doc;
@@ -683,6 +756,8 @@ void haLoop() {
 bool haWsConnected() {
     return g_wsStarted && g_wsAuthed;
 }
+
+bool haStateUpdatesReady() { return haWsConnected() && g_stateSubscribed; }
 
 void haSetStateCallback(HaStateCallback cb) {
     g_stateCb = cb;

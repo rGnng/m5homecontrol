@@ -28,6 +28,7 @@ arduino = arduino.replace('    void toUpperCase()',
                          '    void toUpperCase()')
 prefix = r'''
 #include "ha_client.h"
+#include "connected_power.h"
 #include <ArduinoJson.h>
 #include <atomic>
 #include <cassert>
@@ -73,23 +74,31 @@ bool haWsConnected(){return socketConnected;}
 static void animateCommand(){assert(std::this_thread::get_id()==mainThread);++commandAnimations;}
 static HaCommandCallback g_commandCb=animateCommand;
 struct {String haUrl="http://fake",haToken="fake-token";} g_config;
+static int powerWork=0,requestedRefreshes=0;
+void beginConnectedPowerWork(){++powerWork;}
+void endConnectedPowerWork(){--powerWork;}
+static void requestEntityRefresh(const String&){++requestedRefreshes;}
 static bool configComplete(){return true;}
 static bool parseState(EntityState& e,JsonVariantConst data){e.state=data["state"].as<String>();return true;}
 struct {template<class... T>void printf(const char*,T...){} } Serial;
-struct WiFiClient{};
+struct WiFiClient : std::istringstream {
+    int read(){return get();}
+    bool connected(){return rdbuf()->in_avail()>0;}
+};
 struct WiFiClientSecure {void setInsecure(){}};
 static String httpBody="{}";
 struct HTTPClient {
-    std::istringstream stream;
+    WiFiClient stream;
     template<class Client>void begin(Client&,const String&){}
     void setTimeout(int){} void setConnectTimeout(int){} void setReuse(bool){}
     void addHeader(const char*,const String&){}
     int GET(){assert(std::this_thread::get_id()!=mainThread);delay(httpDelay);stream.str(httpBody);return httpCode;}
     int POST(const String&){return GET();}
     String getString(){return httpBody;}
-    std::istringstream& getStream(){return stream;}
+    WiFiClient& getStream(){return stream;}
     void end(){}
 };
+#include "deadline_stream.h"
 '''
 stats = source[source.index('struct HaLinkStats {'):source.index('static uint64_t clockMillis(')]
 worker = source[source.index('struct HttpWork {'):source.index('static bool httpRequestBlocking(')]
@@ -114,6 +123,7 @@ int main(){
     taskAvailable=true;lastPump=millis();
     assert(callService("climate","set_hvac_mode","climate.ac","\"hvac_mode\":\"cool\""));
     assert(pumps>20 && socketConnected && g_haOnline && commandAnimations==1);
+    assert(powerWork==0 && requestedRefreshes==1);
     assert(g_linkStats.lastCommandStatus==200 && g_linkStats.commandFailures==0);
     assert(g_linkStats.lastCommandMs>=100);
     // An HA service error does not change connection state or stop heartbeats.
@@ -149,6 +159,7 @@ int main(){
     assert(!callService("climate","set_temperature","climate.ac"));
     assert(g_linkStats.lastCommandStatus==0 && g_linkStats.commandFailures==3);
     assert(socketConnected && g_haOnline && !g_httpWaiting);
+    assert(powerWork==0 && requestedRefreshes==1);
     std::puts("PASS: stalled HTTP keeps WebSocket pumping; command success/errors/timeouts, callbacks, entity list, queue/resource failures, reentrancy and link state");
     std::fflush(stdout);
     // The firmware worker is intentionally permanent; end without tearing down its queue.

@@ -108,7 +108,8 @@ PMIC samples show a plug over the battery: assumed dock/external power, with
 charging status unknown. A responding PMIC clears this hint immediately.
 This user-selected heuristic can also trigger on an I2C fault. Before it activates,
 an unavailable battery reading shows `?`, never an empty battery.
-Power is sampled every 500 ms, so the hint takes roughly 1–1.5 seconds to activate.
+Power is sampled every 500 ms while active and every 5 seconds while idle, so
+the hint takes roughly 1–1.5 seconds while active or 10–15 seconds while idle.
 
 The Bottom3 has its own TP4057 charger and a separate battery power switch.
 The Core's IP5306 readings do not directly report the TP4057 charging state.
@@ -132,7 +133,8 @@ The firmware contains no Hall-sensor sampling or experimental Hall endpoint.
 
 The firmware retries an unavailable PMIC, including after startup on the dock.
 After three failed samples it reinitializes the shared I2C bus and retries the
-PMIC, at most once per ten seconds. When the IP5306 responds, its boost keep-on
+PMIC, at most once per ten seconds while active or once per minute while idle.
+When the IP5306 responds, its boost keep-on
 bit is enabled to keep the battery output ready while dock power bypasses it.
 The manager also verifies boost enable, Core charge enable, and automatic boost
 handoff when the Core input is removed. Register changes use read-modify-write;
@@ -158,6 +160,37 @@ It also reports `dock_inferred`, `pmic_online`, `core_keep_on`, `core_boost_enab
 The Bottom3 TP4057's `CHRG` and `STDBY` pins are unconnected in the
 [manufacturer schematic](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1273/A168_Faces_Bottom3_Sche.pdf),
 so actual dock charging detection requires a hardware status connection.
+
+### Connected power saving
+
+The remote stays connected and accepts HA updates, web configuration, and OTA.
+It does not enter ESP32 deep sleep or light sleep, and does not use the inferred
+dock hint to change its power policy.
+
+- Wi-Fi uses minimum modem power saving while retaining its association and
+  WebSocket heartbeat. Larger HTTP transfers temporarily disable modem sleep
+  and restore its previous setting afterward.
+- CPU speed is set once to 160 MHz before Wi-Fi starts. Runtime frequency
+  switching is disabled after the device failed an idle/wake test. Idle still
+  reduces background polling after 15 seconds or when the display is dim/off.
+- Display off sets backlight brightness to zero and keeps the LCD controller
+  awake. Wake repaints cached HA state before lighting the screen. LCD controller
+  sleep is disabled pending reliable hardware wake testing.
+- The speaker task and DAC stop one second after a sound finishes. GPIO25 is
+  driven low on Core Basic. This quiets the signal path; the board does not
+  provide a separate amplifier shutdown control.
+- Idle keypad polling slows from 20 ms to 100 ms and PMIC sampling from 500 ms
+  to 5 seconds. Explicit battery refresh bypasses the sample cache.
+- HA sends state updates only for configured primary and AUX entities. Commands
+  queue a delayed REST check of matching slots, rather than every page. Full
+  reconciliation runs every 30 minutes while subscribed, or every 30 seconds
+  if live state updates are unavailable. Failed reads retry after 15 seconds.
+
+`/diag` reports `power_idle`, actual `cpu_mhz`, `wifi_sleep`, `lcd_sleep`,
+`audio_quiet`, polling intervals, REST counters, `ws_state_ready`, watched entity
+count, state events, and subscription errors. Power saving on the dock can be
+verified through these states, but battery runtime or current savings need an
+off-dock runtime test or a current meter.
 
 ## Backlight schedule
 
@@ -416,15 +449,22 @@ The full screen redraws at boot and when entering/leaving the dim palette.
 - `GET /api/states/<entity_id>` initial values
 - `GET /api/states` entity selector
 - REST service calls for control
-- WebSocket `ws://<host>:8123/api/websocket` for `state_changed`
+- WebSocket `ws://<host>:8123/api/websocket` with a `subscribe_trigger` state
+  filter containing deduplicated configured primary and AUX IDs; attribute-only
+  changes also update the remote
 - WebSocket `render_template` subscription for [HA time](#home-assistant-time)
-- Initial resync after WebSocket authentication and every five minutes
+- Initial resync after WebSocket authentication and every 30 minutes
 - REST resync fetches all configured entities and climate AUX entities; only
   visible rows redraw. All configured entities receive WebSocket updates
 - HTTP requests, including the web entity selector, run on a worker while the
   main thread continues WebSocket processing. Actions still wait for their HTTP
   result; live state events received during a REST fetch take precedence over
   that snapshot
+- State subscription failures use 30-second REST reconciliation and retry the
+  subscription every 30 seconds. The `subscribe_trigger` operation requires an
+  HA administrator token, as does the existing clock template subscription
+- Entity-list JSON downloads have a 15-second total read deadline; a stalled or
+  trickling HA server cannot hold web configuration indefinitely
 
 ## Build and flash
 
@@ -512,4 +552,5 @@ g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
 python3 tools/test_ha_clock_ws.py
 python3 tools/test_ha_http_worker.py
 python3 tools/test_web_config.py
+python3 tools/test_connected_power.py
 ```

@@ -58,5 +58,7 @@ inline PowerStatus decodeIp5306Power(bool inputOk, uint8_t input,
     return status;
 }
 
-// One shared sample for the display and diagnostics; refreshes every 500 ms.
-PowerStatus readPowerStatus();
+void setPowerPollingIdle(bool idle);
+uint32_t powerSampleIntervalMs();
+// Share cached samples; a manual battery refresh may request a fresh reading.
+PowerStatus readPowerStatus(bool force = false);

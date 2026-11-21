@@ -2,12 +2,16 @@
 
 #include <M5Unified.h>
 
-PowerStatus readPowerStatus() {
+static bool g_powerPollingIdle = false;
+void setPowerPollingIdle(bool idle) { g_powerPollingIdle = idle; }
+uint32_t powerSampleIntervalMs() { return g_powerPollingIdle ? 5000 : 500; }
+
+PowerStatus readPowerStatus(bool force) {
     static PowerStatus status;
     static uint32_t sampledAt = 0;
     static bool sampled = false;
     uint32_t now = millis();
-    if (sampled && now - sampledAt < 500) return status;
+    if (!force && sampled && now - sampledAt < powerSampleIntervalMs()) return status;
     sampled = true;
     sampledAt = now;
 
@@ -27,7 +31,8 @@ PowerStatus readPowerStatus() {
         sample();
         bool online = inputOk || fullOk || levelOk;
         failures = online ? 0 : failures + 1;
-        if (failures >= 3 && (!recoveryAttempts || now - lastRecovery >= 10000)) {
+        uint32_t recoveryInterval = g_powerPollingIdle ? 60000 : 10000;
+        if (failures >= 3 && (!recoveryAttempts || now - lastRecovery >= recoveryInterval)) {
             ++recoveryAttempts;
             lastRecovery = now;
             // Retry a late/stuck bus without restarting the ESP32 or applying

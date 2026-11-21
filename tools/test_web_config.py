@@ -32,6 +32,9 @@ arduino = arduino.replace('    String() = default;', '''
 arduino = arduino.replace('std::string(value){}', 'std::string(value){assert(size()<=8192);}')
 prefix = r'''
 #include "app_config.h"
+#include "connected_power.h"
+void beginConnectedPowerWork(){}
+void endConnectedPowerWork(){}
 #include "ha_client.h"
 #include "html_stream.h"
 #include <algorithm>

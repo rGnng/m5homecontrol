@@ -64,5 +64,34 @@ int main() {
     status = readPowerStatus();
     assert(status.charging == ChargeState::Charging);
     assert(!status.dockInferred);
+    // Connected idle samples at 5s, explicit power reads bypass that cache.
+    setPowerPollingIdle(true);
+    assert(powerSampleIntervalMs() == 5000);
+    reads = M5.Power.Ip5306.reads;
+    testMillis = 17000;
+    readPowerStatus();
+    assert(M5.Power.Ip5306.reads == reads);
+    testMillis = 17500;
+    readPowerStatus();
+    assert(M5.Power.Ip5306.reads > reads);
+    reads = M5.Power.Ip5306.reads;
+    testMillis = 17501;
+    readPowerStatus(true);
+    assert(M5.Power.Ip5306.reads > reads);
+    // Missing PMIC recovery backs off to 60s while idle.
+    M5.Power.Ip5306.online = false;
+    M5.Power.Ip5306.wakeOnBegin = false;
+    testMillis = 22501; readPowerStatus();
+    testMillis = 27501; readPowerStatus();
+    testMillis = 32501; readPowerStatus();
+    assert(M5.In_I2C.begins == 2);
+    testMillis = 72501; readPowerStatus();
+    assert(M5.In_I2C.begins == 3);
+    testMillis = 127501; readPowerStatus();
+    assert(M5.In_I2C.begins == 3);
+    testMillis = 132501; readPowerStatus();
+    assert(M5.In_I2C.begins == 4);
+    setPowerPollingIdle(false);
+    assert(powerSampleIntervalMs() == 500);
     std::puts("PASS: delayed startup, keep-on/handoff, preserved bits, debounced dock hint, unknown charge status, recovery, USB transition");
 }

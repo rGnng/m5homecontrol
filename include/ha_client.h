@@ -73,6 +73,7 @@ String displayText(const String& text);
 void haBegin();
 void haLoop();
 bool haWsConnected();
+bool haStateUpdatesReady();
 bool haGetLocalTime(struct tm& timeinfo);
 String haTimeZone();
 String haLocalTimeText();
