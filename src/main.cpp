@@ -174,7 +174,7 @@ static EntityState& cardAt(int slot) {
     return g_emptyCard;
 }
 
-static int g_refreshIndex = -1;
+static int g_refreshIndex = -1, g_refreshStartIndex = 0;
 static int g_refreshFail = 0;
 static uint32_t g_nextRefresh = 0;
 static bool g_refreshPending[MAX_ENTITIES] = {};
@@ -184,12 +184,18 @@ static uint32_t g_restRefreshReads = 0, g_fullRefreshes = 0;
 static wl_status_t g_prevWifiLink = WL_IDLE_STATUS;
 
 String refreshStatus() {
-    unsigned pending = 0;
-    for (int i = 0; i < g_config.entityCount; ++i) pending += g_refreshPending[i];
+    unsigned pending = 0, primaryReady = 0, auxReady = 0;
+    for (int i = 0; i < g_config.entityCount; ++i) {
+        pending += g_refreshPending[i];
+        primaryReady += !g_cards[i].id.isEmpty() && g_cards[i].available;
+        auxReady += !g_cards[i].aux.id.isEmpty() && g_cards[i].aux.available;
+    }
     return "rest_refresh_reads=" + String(g_restRefreshReads) +
            " rest_full_refreshes=" + String(g_fullRefreshes) +
            " rest_refresh_pending=" + String(pending) +
-           " rest_full_interval_s=" + String(haStateUpdatesReady() ? 1800 : 30);
+           " entity_values_ready=" + String(primaryReady) +
+           " aux_values_ready=" + String(auxReady) +
+           " rest_full_interval_s=" + String(haDataSuspended() ? 0 : haStateUpdatesReady() ? 1800 : 30);
 }
 
 static bool g_cmdMode = false;
@@ -531,6 +537,7 @@ static void applyBacklightPercent(int percent) {
 }
 
 static void renderInitial();
+static bool setDisplayDataSuspended(bool suspended);
 static void scheduleTick(bool explicitInput = false);
 
 static void noteActivity() {
@@ -548,6 +555,8 @@ static bool inTimeRange(int now, int start, int end) {
 }
 
 static void applyBacklightPlan(BacklightPlan plan) {
+    g_backlightPhase = plan.phase;
+    bool dataChanged = setDisplayDataSuspended(plan.phase != BacklightPhase::Normal);
     bool waking = g_lcdSleeping && plan.phase != BacklightPhase::Off;
     if (waking) {
         M5.Display.wakeup();
@@ -557,13 +566,13 @@ static void applyBacklightPlan(BacklightPlan plan) {
     // screen on wake. Entering dim mode reduces the backlight before repaint.
     bool dimTheme = plan.phase == BacklightPhase::Off ? g_dimTheme
                                                      : plan.phase == BacklightPhase::Dim;
-    if (waking || dimTheme != g_dimTheme) {
-        if (dimTheme || waking) applyBacklightPercent(waking ? 0 : plan.brightness);
+    if (dataChanged || waking || dimTheme != g_dimTheme) {
+        if (dimTheme || waking || plan.phase == BacklightPhase::Off)
+            applyBacklightPercent(waking || plan.phase == BacklightPhase::Off ? 0 : plan.brightness);
         g_dimTheme = dimTheme;
         applyTheme();
         renderInitial();
     }
-    g_backlightPhase = plan.phase;
     applyBacklightPercent(plan.brightness);
     if (plan.phase == BacklightPhase::Off && !g_lcdSleeping) {
         M5.Display.sleep();
@@ -781,7 +790,7 @@ static int lightPercent(const EntityState& e) {
 
 static String entityStateText(const EntityState& e) {
     if (e.id.isEmpty()) return String("");
-    if (!e.available) return String("--");
+    if (haDataSuspended() || !e.available) return String("--");
 
     switch (e.type) {
         case EntityType::Light: {
@@ -886,7 +895,7 @@ static void drawLinkIcon(LovyanGFX& g, int x, int y) {
     bool linkUp = wifiUp && g_haOnline;
 
     // Connecting, retrying or disconnected: blink the signal icon.
-    if (!linkUp && !g_linkBlinkOn) return;
+    if (!haDataSuspended() && !linkUp && !g_linkBlinkOn) return;
 
     int rssi = wifiUp ? WiFi.RSSI() : -100;
     int bars = 0;
@@ -1145,7 +1154,7 @@ static String acActionText(const EntityState& e) {
 }
 
 static String acAuxText(const EntityState& e) {
-    if (e.aux.id.isEmpty() || !e.aux.available) return "--";
+    if (haDataSuspended() || e.aux.id.isEmpty() || !e.aux.available) return "--";
     switch (e.aux.type) {
         case EntityType::Light: {
             if (!e.aux.on) return String("OFF");
@@ -1181,12 +1190,14 @@ static String acAuxLabel(const EntityState& e, int index) {
 }
 
 static String acTempText(const EntityState& e, bool editing) {
+    if (haDataSuspended() || !e.available) return "--";
     if (editing && validTemp(g_acDraftTemp)) return tempText(g_acDraftTemp);
     if (validTemp(e.target)) return tempText(e.target);
     return String("--");
 }
 
 static String acCurrentText(const EntityState& e) {
+    if (haDataSuspended() || !e.available) return "--";
     return validTemp(e.current) ? tempText(e.current) : String("--");
 }
 
@@ -1226,6 +1237,7 @@ static String acLabelFor(const EntityState& e, int index, int slot) {
 }
 
 static String acValueFor(const EntityState& e, int slot) {
+    if (slot >= 0 && slot < AC_ROWS && (haDataSuspended() || !e.available)) return "--";
     switch (slot) {
         case 0: return acModeText(e);
         case 1: return acTempText(e, g_acEditing);
@@ -1313,6 +1325,7 @@ static void redrawRow(int slot, bool selected) {
 }
 
 static void redrawStatusRegions() {
+    if (haDataSuspended()) return;
     if (!g_statusTitleDirty && !g_statusCenterDirty &&
         !g_statusLinkDirty && !g_statusBatteryDirty) {
         return;
@@ -1346,7 +1359,7 @@ static void redrawStatusRegions() {
 }
 
 static void renderDirty() {
-    if (g_lcdSleeping) return;  // Retain dirty flags; wake repaints the latest cached state.
+    if (g_lcdSleeping || haDataSuspended()) return;  // Retain dirty flags; wake repaints the latest cached state.
     if (g_detail) {
         bool detailDirty = (g_detailGlobal >= 0 && g_dirty[g_detailGlobal]);
         for (int i = 0; i < MAX_ENTITIES; i++) g_dirty[i] = false;
@@ -1374,6 +1387,7 @@ static void renderDirty() {
 //  WebSocket callbacks
 // ---------------------------------------------------------------------
 static void onHaState(const EntityState& state) {
+    if (haDataSuspended()) return;
     for (int i = 0; i < g_config.entityCount; i++) {
         EntityState& card = g_cards[i];
         if (card.id == state.id) {
@@ -1409,11 +1423,12 @@ static void onHaState(const EntityState& state) {
 static void onHaStatus(bool online) {
     if (g_haOnline != online) {
         g_haOnline = online;
-        g_statusLinkDirty = true;
+        if (!haDataSuspended()) g_statusLinkDirty = true;
     }
 }
 
 static void onHaAuth() {
+    if (haDataSuspended()) return;
     // Re-sync through REST after a successful WebSocket subscription.
     g_refreshIndex = -1;
     g_nextRefresh = 0;
@@ -1492,10 +1507,37 @@ static EntityState& selectedEntity() {
 }
 
 static bool callService(const String& domain, const String& service,
-                        const String& entityId, const String& extra = "") {
-    bool ok = haCallService(domain, service, entityId, extra);
-    if (ok) requestEntityRefresh(entityId);
-    return ok;
+                        const String& entityId, const String& extra = "",
+                        HaResultCallback complete = nullptr) {
+    const uint32_t generation = haDataGeneration();
+    return haCallService(domain, service, entityId, extra, [entityId, complete, generation](bool ok) {
+        if (generation != haDataGeneration()) return;
+        if (complete) complete(ok);
+        // Reconcile even transport failures: HA may have acted before timeout.
+        requestEntityRefresh(entityId);
+        for (int i = 0; i < g_config.entityCount; ++i) {
+            if (g_cards[i].id == entityId || g_cards[i].aux.id == entityId) g_dirty[i] = true;
+        }
+    });
+}
+
+template<class Entity, class Update>
+static bool commandEntity(Entity& entity, const String& domain, const String& service,
+                          const String& extra, Update update) {
+    const uint32_t revision = entity.revision;
+    const String id = entity.id;
+    return callService(domain, service, id, extra, [&entity, id, revision, update](bool ok) {
+        if (ok && entity.id == id && entity.revision == revision) update(entity);
+    });
+}
+
+template<class Entity>
+static bool toggleEntity(Entity& entity, const String& domain) {
+    const bool on = !entity.on;
+    return commandEntity(entity, domain, "toggle", "", [on](Entity& state) {
+        state.on = on;
+        state.state = on ? "on" : "off";
+    });
 }
 
 static void acMove(int delta) {
@@ -1530,65 +1572,50 @@ static bool acNextMode(EntityState& e, int index) {
     String list = acModeCycle(e, index);
     String next = nextCsv(list, e.state);
     if (next.isEmpty() || next.equalsIgnoreCase(e.state)) return false;
-    bool ok = callService("climate", "set_hvac_mode", e.id,
-                          "\"hvac_mode\":\"" + next + "\"");
-    if (ok) {
-        e.state = next;
-        e.on = (next != "off");
-        e.available = true;
-    }
-    return ok;
+    return commandEntity(e, "climate", "set_hvac_mode",
+                         "\"hvac_mode\":\"" + next + "\"", [next](EntityState& state) {
+        state.state = next;
+        state.on = (next != "off");
+        state.available = true;
+    });
 }
 
-static void acCycleFan() {
-    EntityState& e = acEntity();
+static void acCycleFan(EntityState& e) {
     if (e.fanModes.isEmpty()) return;
     String next = nextCsv(e.fanModes, e.fanMode);
     if (next.isEmpty()) return;
-    bool ok = callService("climate", "set_fan_mode", e.id,
-                          "\"fan_mode\":\"" + next + "\"");
+    bool ok = commandEntity(e, "climate", "set_fan_mode",
+                            "\"fan_mode\":\"" + next + "\"",
+                            [next](EntityState& state) { state.fanMode = next; });
     if (ok) {
-        e.fanMode = next;
-        redrawAcRow(2);
         scheduleRefresh();
         sfxSelect();
     }
 }
 
-static void acCycleSwing() {
-    EntityState& e = acEntity();
+static void acCycleSwing(EntityState& e) {
     if (e.swingModes.isEmpty()) return;
     String next = nextCsv(e.swingModes, e.swingMode);
     if (next.isEmpty()) return;
-    bool ok = callService("climate", "set_swing_mode", e.id,
-                          "\"swing_mode\":\"" + next + "\"");
+    bool ok = commandEntity(e, "climate", "set_swing_mode",
+                            "\"swing_mode\":\"" + next + "\"",
+                            [next](EntityState& state) { state.swingMode = next; });
     if (ok) {
-        e.swingMode = next;
-        redrawAcRow(3);
         scheduleRefresh();
         sfxSelect();
     }
 }
 
-static void acAuxAction() {
-    EntityState& e = acEntity();
-    if (e.aux.id.isEmpty()) return;
+static void acAuxAction(EntityState& e) {
+    if (e.aux.id.isEmpty() || !e.aux.available || haDataSuspended()) return;
     bool ok = false;
     String domain = entityDomain(e.aux.id);
     switch (e.aux.type) {
         case EntityType::Light:
-            ok = callService(domain, "toggle", e.aux.id);
-            if (ok) {
-                e.aux.on = !e.aux.on;
-                e.aux.state = e.aux.on ? "on" : "off";
-            }
+            ok = toggleEntity(e.aux, domain);
             break;
         case EntityType::Switch:
-            ok = callService("homeassistant", "toggle", e.aux.id);
-            if (ok) {
-                e.aux.on = !e.aux.on;
-                e.aux.state = e.aux.on ? "on" : "off";
-            }
+            ok = toggleEntity(e.aux, "homeassistant");
             break;
         case EntityType::Scene:
             ok = callService(domain, "turn_on", e.aux.id);
@@ -1603,7 +1630,6 @@ static void acAuxAction() {
             return;
     }
     if (ok) {
-        redrawAcRow(5);
         scheduleRefresh();
         sfxSelect();
     }
@@ -1625,9 +1651,9 @@ static void acTempAction() {
     float value = constrain(g_acDraftTemp, e.minTemp, e.maxTemp);
     char extra[40];
     snprintf(extra, sizeof(extra), "\"temperature\":%.2f", value);
-    bool ok = callService("climate", "set_temperature", e.id, extra);
+    bool ok = commandEntity(e, "climate", "set_temperature", extra,
+                            [value](EntityState& state) { state.target = value; });
     if (ok) {
-        e.target = value;
         g_acEditing = false;
         redrawAcDetail();
         scheduleRefresh();
@@ -1635,79 +1661,57 @@ static void acTempAction() {
     }
 }
 
-static void acAction() {
-    if (!acDetailActive()) return;
-    if (g_acEditing) {
-        acTempAction();
-        return;
-    }
-    switch (g_acCursor) {
+static void performAcAction(EntityState& e, int index, int row) {
+    if (haDataSuspended() || (row != 5 && !e.available)) return;
+    switch (row) {
         case 0:
-            if (acNextMode(acEntity(), g_detailGlobal)) {
-                redrawAcDetail();
-                scheduleRefresh();
-                sfxSelect();
-            }
+            if (acNextMode(e, index)) { scheduleRefresh(); sfxSelect(); }
             break;
-        case 1: acTempAction(); break;
-        case 2: acCycleFan(); break;
-        case 3: acCycleSwing(); break;
-        case 4: break;
-        case 5: acAuxAction(); break;
-        case 6: break;
+        case 1:
+            // Entering an editor only makes sense while that editor is visible.
+            if (acDetailActive() && &acEntity() == &e && g_acCursor == row) acTempAction();
+            break;
+        case 2: acCycleFan(e); break;
+        case 3: acCycleSwing(e); break;
+        case 5: acAuxAction(e); break;
+        default: break;
     }
 }
 
-static void primaryAction() {
-    if (g_detail) {
-        acAction();
-        return;
-    }
+static void acAction() {
+    if (!acDetailActive() || !acEntity().available || haDataSuspended()) return;
+    if (g_acEditing) acTempAction();
+    else performAcAction(acEntity(), g_detailGlobal, g_acCursor);
+}
 
-    EntityState& e = cardAt(g_focus);
-    if (e.id.isEmpty()) return;
-
+static void performPrimaryAction(EntityState& e, int index) {
+    if (e.id.isEmpty() || !e.available || haDataSuspended()) return;
     bool ok = false;
-    if (e.type != EntityType::Climate && e.type != EntityType::Sensor) {
-        sfxSelect();
-    }
+    if (e.type != EntityType::Climate && e.type != EntityType::Sensor) sfxSelect();
     String domain = entityDomain(e.id);
     switch (e.type) {
-        case EntityType::Light:
-            ok = callService(domain, "toggle", e.id);
-            if (ok) {
-                e.on = !e.on;
-                e.state = e.on ? "on" : "off";
-            }
-            break;
-        case EntityType::Switch:
-            ok = callService("homeassistant", "toggle", e.id);
-            if (ok) {
-                e.on = !e.on;
-                e.state = e.on ? "on" : "off";
-            }
-            break;
-        case EntityType::Scene:
-            ok = callService(domain, "turn_on", e.id);
-            break;
-        case EntityType::Media:
-            ok = callService(domain, "media_play_pause", e.id);
-            break;
-        case EntityType::Cover:
-            ok = callService(domain, "toggle", e.id);
-            break;
+        case EntityType::Light: ok = toggleEntity(e, domain); break;
+        case EntityType::Switch: ok = toggleEntity(e, "homeassistant"); break;
+        case EntityType::Scene: ok = callService(domain, "turn_on", e.id); break;
+        case EntityType::Media: ok = callService(domain, "media_play_pause", e.id); break;
+        case EntityType::Cover: ok = callService(domain, "toggle", e.id); break;
         case EntityType::Climate:
-            ok = acNextMode(e, globalSlot(g_focus));
+            ok = acNextMode(e, index);
             if (ok) sfxSelect();
             break;
-        case EntityType::Sensor:
-        default:
-            return;
+        default: return;
     }
-
     if (ok) scheduleRefresh();
-    redrawRow(g_focus, true);
-    redrawStatusRegions();
+}
+
+static bool dimActionTargets(const String& id);
+
+static void primaryAction() {
+    const EntityState& e = selectedEntity();
+    const String& id = g_detail && g_acCursor == 5 ? e.aux.id : e.id;
+    if (dimActionTargets(id)) return;
+    if (g_detail) acAction();
+    else performPrimaryAction(cardAt(g_focus), globalSlot(g_focus));
 }
 
 template<class Light> static bool adjustLightBrightness(Light& e, int delta) {
@@ -1716,11 +1720,12 @@ template<class Light> static bool adjustLightBrightness(Light& e, int delta) {
     int pct = constrain(current + delta * 10, 0, 100);
     if (pct == current) return false;
     String extra = pct ? "\"brightness_pct\":" + String(pct) : String("");
-    if (!callService(entityDomain(e.id), pct ? "turn_on" : "turn_off", e.id, extra)) return false;
-    e.on = pct > 0;
-    e.state = e.on ? "on" : "off";
-    e.brightness = (pct * 255 + 50) / 100;
-    return true;
+    return commandEntity(e, entityDomain(e.id), pct ? "turn_on" : "turn_off", extra,
+                         [pct](Light& state) {
+        state.on = pct > 0;
+        state.state = state.on ? "on" : "off";
+        state.brightness = (pct * 255 + 50) / 100;
+    });
 }
 
 static bool adjustClimateTemperature(EntityState& e, int delta) {
@@ -1732,12 +1737,13 @@ static bool adjustClimateTemperature(EntityState& e, int delta) {
     if (validTemp(e.target) && fabsf(target - e.target) < 0.0001f) return false;
     char extra[48];
     snprintf(extra, sizeof(extra), "\"temperature\":%.2f", target);
-    if (!callService("climate", "set_temperature", e.id, extra)) return false;
-    e.target = target;
-    return true;
+    return commandEntity(e, "climate", "set_temperature", extra,
+                         [target](EntityState& state) { state.target = target; });
 }
 
 static void adjustSelected(int delta) {
+    const EntityState& selected = selectedEntity();
+    if (dimActionTargets(acDetailActive() && g_acCursor == 5 ? selected.aux.id : selected.id)) return;
     if (acDetailActive()) {
         if (g_acCursor == 1) {
             if (g_acEditing) {
@@ -1775,7 +1781,111 @@ static void changePage(int delta) {
     sfxArrow();
 }
 
-static void directSelect(int idx) {
+enum class DimActionKind : uint8_t { Primary, Adjust };
+struct InputTarget {
+    int index = -1, row = 0;
+    bool detail = false;
+    String id;
+};
+struct DimInputAction {
+    bool pending = false, reading = false;
+    InputTarget target;
+    DimActionKind kind = DimActionKind::Primary;
+    int delta = 0;
+    uint32_t generation = 0, sequence = 0, queuedAt = 0;
+};
+static DimInputAction g_dimAction;
+static EntityState g_dimActionState;
+static InputTarget g_dimButtonTarget;
+static uint32_t g_dimButtonGeneration = 0;
+static bool g_dimButtonPress = false;
+
+static InputTarget captureInputTarget() {
+    InputTarget target;
+    target.detail = acDetailActive();
+    target.index = target.detail ? g_detailGlobal : globalSlot(g_focus);
+    target.row = target.detail ? g_acCursor : 0;
+    if (target.index >= 0 && target.index < g_config.entityCount) {
+        const auto& e = g_cards[target.index];
+        target.id = target.detail && target.row == 5 ? e.aux.id : e.id;
+    }
+    return target;
+}
+
+static bool dimActionTargets(const String& id) {
+    return g_dimAction.pending && g_dimAction.generation == haDataGeneration() &&
+           !id.isEmpty() && g_dimAction.target.id == id;
+}
+
+static bool dimActionPending() {
+    return g_dimAction.pending && g_dimAction.generation == haDataGeneration();
+}
+
+static void queueDimAction(const InputTarget& target, DimActionKind kind, int delta = 0) {
+    if (g_dimAction.pending && g_dimAction.generation != haDataGeneration()) g_dimAction.pending = false;
+    if (g_dimAction.pending || target.id.isEmpty() || haDataSuspended()) return;
+    if (target.detail && kind == DimActionKind::Primary && (target.row == 4 || target.row == 6)) return;
+    g_dimAction.target = target;
+    g_dimAction.kind = kind;
+    g_dimAction.delta = delta;
+    g_dimAction.generation = haDataGeneration();
+    ++g_dimAction.sequence;
+    g_dimAction.queuedAt = millis();
+    g_dimAction.reading = false;
+    g_dimAction.pending = true;
+}
+
+static void executeDimAction(const DimInputAction& action) {
+    const InputTarget& target = action.target;
+    EntityState& e = g_cards[target.index];
+    if (action.kind == DimActionKind::Primary) {
+        if (target.detail) performAcAction(e, target.index, target.row);
+        else performPrimaryAction(e, target.index);
+    } else {
+        if (target.detail && target.row == 5) adjustLightBrightness(e.aux, action.delta);
+        else if (!target.detail && e.type == EntityType::Light) adjustLightBrightness(e, action.delta);
+        else if ((!target.detail || target.row == 1) && e.type == EntityType::Climate)
+            adjustClimateTemperature(e, action.delta);
+    }
+}
+
+static void dimActionTick() {
+    if (!g_dimAction.pending) return;
+    if (haDataSuspended() || g_dimAction.generation != haDataGeneration() ||
+        millis() - g_dimAction.queuedAt >= 10000) {
+        g_dimAction.pending = false;
+        return;
+    }
+    if (g_dimAction.reading || haHttpBusy()) return;
+    const DimInputAction action = g_dimAction;
+    const InputTarget& target = action.target;
+    if (target.index < 0 || target.index >= g_config.entityCount) { g_dimAction.pending = false; return; }
+    const EntityState& e = g_cards[target.index];
+    bool aux = target.detail && target.row == 5;
+    const String& id = aux ? e.aux.id : e.id;
+    if (id != target.id) { g_dimAction.pending = false; return; }
+    const uint32_t revision = aux ? e.aux.revision : e.revision;
+    g_dimActionState = EntityState{};
+    g_dimActionState.id = id;
+    if (haFetchState(g_dimActionState, [action, revision, aux](bool ok) {
+        if (!g_dimAction.pending || action.sequence != g_dimAction.sequence) return;
+        g_dimAction.pending = false; // Consume before dispatch: never replay this input.
+        if (!ok || haDataSuspended() || action.generation != haDataGeneration() ||
+            millis() - action.queuedAt >= 10000) return;
+        const InputTarget& target = action.target;
+        EntityState& e = g_cards[target.index];
+        if ((aux ? e.aux.id : e.id) != target.id) return;
+        // Keep a newer live event if it arrived during the targeted read.
+        if ((aux ? e.aux.revision : e.revision) == revision) {
+            g_dimActionState.revision = revision;
+            onHaState(g_dimActionState);
+        }
+        if (!(aux ? e.aux.available : e.available)) return;
+        executeDimAction(action);
+    })) g_dimAction.reading = true;
+}
+
+static void directSelect(int idx, bool refreshFirst = false) {
     if (g_detail || idx < 0 || idx >= GRID_SLOTS) return;
     if (globalSlot(idx) >= g_config.entityCount) return;
     if (idx != g_focus) {
@@ -1786,14 +1896,23 @@ static void directSelect(int idx) {
         drawMenuRow(M5.Display, idx, cardAt(idx), true);
         M5.Display.endWrite();
     }
-    primaryAction();
+    if (refreshFirst) queueDimAction(captureInputTarget(), DimActionKind::Primary);
+    else primaryAction();
 }
 
 // ---------------------------------------------------------------------
 //  Input
 // ---------------------------------------------------------------------
 static void handleKey(char c) {
+    // R5C1 is idempotent in normal/dim. An off display still consumes the key
+    // as wake-only, like every other keypad key.
+    if (c == KEYPAD_DIM_KEY && g_backlightPhase != BacklightPhase::Off) {
+        setDisplayMode("dim");
+        return;
+    }
     bool wakeOnly = g_backlightPhase == BacklightPhase::Off;
+    bool refreshFirst = g_backlightPhase == BacklightPhase::Dim;
+    InputTarget target = captureInputTarget();
     noteActivity();
     if (wakeOnly) return;
 
@@ -1809,7 +1928,8 @@ static void handleKey(char c) {
         return;
     }
     if (c == '+' || c == '-') {
-        adjustSelected(c == '+' ? +1 : -1);
+        if (refreshFirst) queueDimAction(target, DimActionKind::Adjust, c == '+' ? +1 : -1);
+        else adjustSelected(c == '+' ? +1 : -1);
         return;
     }
 
@@ -1817,7 +1937,10 @@ static void handleKey(char c) {
         switch (c) {
             case 'w': case 'a': acMove(-1); break;
             case 's': case 'd': acMove(+1); break;
-            case 'e': case '=': case '\r': acAction(); break;
+            case 'e': case '=': case '\r':
+                if (refreshFirst) queueDimAction(target, DimActionKind::Primary);
+                else primaryAction();
+                break;
             case '0': case 'b':
                 if (g_acEditing) {
                     g_acEditing = false;
@@ -1846,9 +1969,13 @@ static void handleKey(char c) {
         case 'w': case 'a': moveFocus(-1); break;
         case 's': case 'd': moveFocus(+1); break;
 
-        case 'e': primaryAction(); break;
+        case 'e':
+            if (refreshFirst) queueDimAction(target, DimActionKind::Primary);
+            else primaryAction();
+            break;
         case '=': case '\r':
             if (cardAt(g_focus).type == EntityType::Climate) openDetail();
+            else if (refreshFirst) queueDimAction(target, DimActionKind::Primary);
             else primaryAction();
             break;
         case '0': case 'b': goBack(); break;
@@ -1857,7 +1984,7 @@ static void handleKey(char c) {
         case 'n': changePage(+1); break;
 
         default:
-            if (c >= '1' && c <= '9') directSelect(c - '1');
+            if (c >= '1' && c <= '9') directSelect(c - '1', refreshFirst);
             break;
     }
 }
@@ -1871,8 +1998,14 @@ static void noteButtonActivity() {
                       (M5.BtnB.isPressed() ? 2 : 0) |
                       (M5.BtnC.isPressed() ? 4 : 0);
     if (!pressed) return;
+    bool dimPress = g_backlightPhase == BacklightPhase::Dim && (pressed & 2);
+    if (dimPress) g_dimButtonTarget = captureInputTarget();
     if (g_backlightPhase == BacklightPhase::Off) g_wakeOnlyButtons |= pressed;
     noteActivity();
+    if (dimPress) {
+        g_dimButtonPress = true;
+        g_dimButtonGeneration = haDataGeneration();
+    }
 }
 
 static void handleButtons() {
@@ -1916,8 +2049,14 @@ static void handleButtons() {
         bHeld = false;
     }
     if (M5.BtnB.wasReleased()) {
-        if (bHeld) primaryAction();
+        if (bHeld) {
+            if (g_dimButtonPress) {
+                if (g_dimButtonGeneration == haDataGeneration())
+                    queueDimAction(g_dimButtonTarget, DimActionKind::Primary);
+            } else primaryAction();
+        }
         bHeld = false;
+        g_dimButtonPress = false;
         g_wakeOnlyButtons &= ~2;
     }
 }
@@ -1957,8 +2096,53 @@ static void handleSerialInput() {
 // ---------------------------------------------------------------------
 //  State refresh
 // ---------------------------------------------------------------------
+static bool g_refreshInFlight = false;
+static int g_refreshAuxIndex = -1;
+static EntityState g_refreshAuxState;
+
+static bool setDisplayDataSuspended(bool suspended) {
+    if (suspended == haDataSuspended()) return false;
+    haSetDataSuspended(suspended);
+    setConnectedPowerSuspended(suspended);
+    setConnectedPowerIdle(suspended);
+    setPowerPollingIdle(suspended);
+    // All cached values become stale, but IDs, names and capabilities remain.
+    // Old HTTP callbacks are rejected by their generation even after waking.
+    for (int i = 0; i < g_config.entityCount; ++i) {
+        g_cards[i].available = false;
+        g_cards[i].aux.available = false;
+        g_dirty[i] = !g_cards[i].id.isEmpty();
+        g_refreshPending[i] = !suspended && !g_cards[i].id.isEmpty();
+    }
+    g_acEditing = false;
+    g_acDraftTemp = NAN;
+    g_refreshInFlight = false;
+    g_refreshAuxIndex = -1;
+    g_refreshIndex = -1;
+    g_refreshFail = 0;
+    g_nextRefresh = 0;
+    g_fullRefreshStarted = false;
+    g_linkBlinkOn = true;
+    g_statusTitleDirty = g_statusCenterDirty = g_statusLinkDirty = g_statusBatteryDirty = true;
+    return true;
+}
+
+static void finishRefreshRead(int index, bool ok) {
+    g_refreshInFlight = false;
+    if (!ok) {
+        g_refreshPending[index] = true;
+        ++g_refreshFail;
+    }
+    g_dirty[index] = true;
+    if (g_refreshFail >= 3) {
+        g_refreshIndex = -1;
+        g_refreshFail = 0;
+        g_nextRefresh = millis() + 15000;
+    }
+}
+
 static void refreshTick() {
-    if (!haConfigured() || WiFi.status() != WL_CONNECTED) return;
+    if (haDataSuspended() || dimActionPending() || !haConfigured() || WiFi.status() != WL_CONNECTED || g_refreshInFlight) return;
 
     uint32_t fullInterval = haStateUpdatesReady() ? 1800000 : 30000;
     if (!g_fullRefreshStarted || millis() - g_lastFullRefresh >= fullInterval) {
@@ -1967,71 +2151,67 @@ static void refreshTick() {
         g_lastFullRefresh = millis();
         ++g_fullRefreshes;
     }
-
+    // Commands take priority over starting another background read.
+    if (haHttpBusy()) return;
+    const uint32_t generation = haDataGeneration();
+    if (g_refreshAuxIndex >= 0) {
+        int index = g_refreshAuxIndex;
+        g_refreshAuxState = EntityState{};
+        g_refreshAuxState.id = g_cards[index].aux.id;
+        const uint32_t revision = g_cards[index].aux.revision;
+        if (haFetchState(g_refreshAuxState, [index, revision, generation](bool ok) {
+            if (generation != haDataGeneration()) return;
+            auto& aux = g_cards[index].aux;
+            if (aux.revision != revision) ok = true;
+            else if (ok) {
+                const auto& state = g_refreshAuxState;
+                aux.name = state.name;
+                aux.state = state.state;
+                aux.unit = state.unit;
+                aux.detail = state.detail;
+                aux.type = state.type;
+                aux.on = state.on;
+                aux.available = state.available;
+                aux.brightness = state.brightness;
+                aux.brightnessAdjustable = state.brightnessAdjustable;
+            } else aux.available = false;
+            finishRefreshRead(index, ok);
+        })) {
+            g_refreshAuxIndex = -1;
+            g_refreshInFlight = true;
+            ++g_restRefreshReads;
+        }
+        return;
+    }
     if (g_refreshIndex < 0) {
         if ((int32_t)(millis() - g_nextRefresh) < 0) return;
         bool pending = false;
         for (int i = 0; i < g_config.entityCount; ++i) pending |= g_refreshPending[i];
         if (!pending) return;
         g_refreshIndex = 0;
+        g_refreshStartIndex = g_page * GRID_SLOTS;
         g_refreshFail = 0;
     }
-
-    while (g_refreshIndex < g_config.entityCount && !g_refreshPending[g_refreshIndex]) ++g_refreshIndex;
+    while (g_refreshIndex < g_config.entityCount &&
+           !g_refreshPending[(g_refreshStartIndex + g_refreshIndex) % g_config.entityCount]) ++g_refreshIndex;
     if (g_refreshIndex >= g_config.entityCount) {
-        bool anyFail = (g_refreshFail > 0);
+        g_nextRefresh = millis() + (g_refreshFail ? 15000 : 0);
         g_refreshIndex = -1;
         g_refreshFail = 0;
-        // Retry failed servers quickly, but do not hammer a healthy one.
-        g_nextRefresh = millis() + (anyFail ? 15000 : 0);
         return;
     }
-
-    int index = g_refreshIndex++;
-    g_refreshPending[index] = false;
-    if (index < g_config.entityCount && !g_cards[index].id.isEmpty()) {
+    const int index = (g_refreshStartIndex + g_refreshIndex) % g_config.entityCount;
+    if (haFetchState(g_cards[index], [index, generation](bool ok) {
+        if (generation != haDataGeneration()) return;
+        auto& card = g_cards[index];
+        if (!card.customName.isEmpty()) card.name = card.customName;
+        if (ok && !card.aux.id.isEmpty()) g_refreshAuxIndex = index;
+        finishRefreshRead(index, ok);
+    })) {
+        g_refreshPending[index] = false;
+        ++g_refreshIndex;
         ++g_restRefreshReads;
-        bool ok = haFetchState(g_cards[index]);
-        if (ok) {
-            if (!g_cards[index].customName.isEmpty()) {
-                g_cards[index].name = g_cards[index].customName;
-            }
-            if (!g_cards[index].aux.id.isEmpty()) {
-                uint32_t revision = g_cards[index].aux.revision;
-                EntityState auxState;
-                auxState.id = g_cards[index].aux.id;
-                ++g_restRefreshReads;
-                bool auxOk = haFetchState(auxState);
-                if (!auxOk) {
-                    g_refreshPending[index] = true;
-                    ++g_refreshFail;
-                }
-                if (auxOk && g_cards[index].aux.revision == revision) {
-                    g_cards[index].aux.name = auxState.name;
-                    g_cards[index].aux.state = auxState.state;
-                    g_cards[index].aux.unit = auxState.unit;
-                    g_cards[index].aux.detail = auxState.detail;
-                    g_cards[index].aux.type = auxState.type;
-                    g_cards[index].aux.on = auxState.on;
-                    g_cards[index].aux.available = auxState.available;
-                    g_cards[index].aux.brightness = auxState.brightness;
-                    g_cards[index].aux.brightnessAdjustable = auxState.brightnessAdjustable;
-                }
-            }
-            // Cache every page, redraw only rows on the visible page.
-            if (index / GRID_SLOTS == g_page) {
-                g_dirty[index] = true;
-            }
-        } else {
-            g_refreshPending[index] = true;
-            g_refreshFail++;
-        }
-    }
-    // Keep failed and unprocessed rows pending, with bounded retry traffic.
-    if (g_refreshFail >= 3) {
-        g_refreshIndex = -1;
-        g_refreshFail = 0;
-        g_nextRefresh = millis() + 15000;
+        g_refreshInFlight = true;
     }
 }
 
@@ -2163,7 +2343,7 @@ void loop() {
     }
     g_prevWifiLink = wifiNow;
 
-    if (!g_haStarted && wifiNow == WL_CONNECTED && haConfigured()) {
+    if (!g_haStarted && wifiNow == WL_CONNECTED && haConfigured() && !haDataSuspended()) {
         haBegin();
         g_haStarted = true;
         g_nextRefresh = 0;
@@ -2175,19 +2355,20 @@ void loop() {
     scheduleTick();
 
     static uint32_t lastBlink = 0;
-    if (millis() - lastBlink > 500) {
+    if (!haDataSuspended() && millis() - lastBlink > 500) {
         lastBlink = millis();
         g_linkBlinkOn = !g_linkBlinkOn;
         bool linkUp = (WiFi.status() == WL_CONNECTED) && g_haOnline;
-        if (!linkUp) g_statusLinkDirty = true;
+        if (!haDataSuspended() && !linkUp) g_statusLinkDirty = true;
     }
 
     renderDirty();
+    dimActionTick();
     refreshTick();
     connectedPowerTick();
 
     static uint32_t lastBar = 0;
-    if (millis() - lastBar > 500) {
+    if (!haDataSuspended() && millis() - lastBar > 500) {
         lastBar = millis();
 
         PowerStatus power = readPowerStatus();

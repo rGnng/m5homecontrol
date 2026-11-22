@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+static constexpr char KEYPAD_DIM_KEY = 'D';
+
 // Translate the Calculator3's physical matrix into the user's key layout.
 // Serial input already uses logical keys and must not pass through this map.
 inline char remapKeypadKey(uint8_t raw) {
@@ -12,6 +14,7 @@ inline char remapKeypadKey(uint8_t raw) {
         case '1': return '7';
         case '2': return '8';
         case '3': return '9';
+        case '.': return KEYPAD_DIM_KEY; // r5c1
         case '-': return '+'; // r3c4
         case '+': return '-'; // r4c4
         case '0': case '4': case '5': case '6':

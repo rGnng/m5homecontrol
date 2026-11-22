@@ -58,6 +58,16 @@ int main(){
     assert(cpu==80 && ps==WIFI_PS_MIN_MODEM);
     endConnectedPowerWork();assert(cpu==80);
     setConnectedPowerIdle(false);assert(cpu==160);
+    // Policy changes during a transfer must restore the latest mode.
+    beginConnectedPowerWork();assert(ps==WIFI_PS_NONE);
+    setConnectedPowerSuspended(true);assert(ps==WIFI_PS_NONE);
+    endConnectedPowerWork();assert(ps==WIFI_PS_MAX_MODEM);
+    beginConnectedPowerWork();setConnectedPowerSuspended(false);
+    endConnectedPowerWork();assert(ps==WIFI_PS_MIN_MODEM);
+    setConnectedPowerSuspended(true);assert(ps==WIFI_PS_MAX_MODEM);
+    {ConnectedPowerWork transfer;assert(ps==WIFI_PS_NONE);}
+    assert(ps==WIFI_PS_MAX_MODEM);
+    setConnectedPowerSuspended(false);assert(ps==WIFI_PS_MIN_MODEM);
     cpuAllowed=false;setConnectedPowerIdle(true);assert(cpu==160);
     cpuAllowed=true;setConnectedPowerIdle(true);assert(cpu==80);
     assert(connectedPowerStatus().find("cpu_mhz=80 wifi_sleep=minimum")!=String::npos);
@@ -103,7 +113,12 @@ policy_prefix = r'''
 #include <algorithm>
 static uint32_t now=0;
 static uint32_t millis(){return now;}
-static bool idle=false,pollIdle=false;
+static bool idle=false,pollIdle=false,suspended=false;
+static uint32_t generation=0;
+bool haDataSuspended(){return suspended;}
+uint32_t haDataGeneration(){return generation;}
+void haSetDataSuspended(bool value){if(value!=suspended){suspended=value;++generation;}}
+static void setConnectedPowerSuspended(bool value){assert(value==suspended);}
 static void setConnectedPowerIdle(bool value){idle=value;}
 static void setPowerPollingIdle(bool value){pollIdle=value;}
 namespace m5 {enum class board_t{board_M5Stack};}
@@ -137,6 +152,7 @@ static constexpr int WL_CONNECTED=3;
 static int wifiStatus=WL_CONNECTED;
 struct {int status(){return wifiStatus;}}WiFi;
 static bool configured=true,wsReady=true,fetchOk=true,auxOk=true,injectAux=false;
+static bool dimActionPending(){return false;}
 bool haConfigured(){return configured;}
 bool haStateUpdatesReady(){return wsReady;}
 static EntityState g_cards[MAX_ENTITIES];
@@ -146,19 +162,32 @@ static int globalSlot(int slot){return slot;}
 static void drawMenuRow(Panel&,int,const EntityState&,bool,bool){++draws;}
 static void redrawAcDetail(){++draws;}
 static void redrawStatusRegions(){}
-static int g_page=0,g_detailGlobal=-1,g_refreshIndex=-1,g_refreshFail=0;
-static bool g_detail=false;
+static int g_page=0,g_detailGlobal=-1,g_refreshIndex=-1,g_refreshFail=0,g_refreshStartIndex=0;
+static bool g_detail=false,g_acEditing=false,g_linkBlinkOn=true;
+static bool g_statusTitleDirty=false,g_statusCenterDirty=false,g_statusLinkDirty=false,g_statusBatteryDirty=false;
+static float g_acDraftTemp=NAN;
 static uint32_t g_nextRefresh=0,g_lastFullRefresh=0,g_restRefreshReads=0,g_fullRefreshes=0;
 static bool g_refreshPending[MAX_ENTITIES]={},g_fullRefreshStarted=false;
 static std::vector<String> reads;
-bool haFetchState(EntityState& e){
+static EntityState* pendingState=nullptr;
+static HaResultCallback pendingRead;
+static uint32_t readGeneration=0;
+bool haHttpBusy(){return pendingState!=nullptr;}
+bool haFetchState(EntityState& e,HaResultCallback complete){
+    assert(!pendingState);pendingState=&e;pendingRead=complete;readGeneration=generation;return true;
+}
+static void completeRead(){
+    if(!pendingState)return;
+    auto& e=*pendingState;pendingState=nullptr;
+    auto complete=std::move(pendingRead);
+    if(readGeneration!=generation){complete(false);return;}
     reads.push_back(e.id);e.state="rest";
     if(injectAux && e.id=="switch.aux"){g_cards[0].aux.state="live";++g_cards[0].aux.revision;}
-    return e.id=="switch.aux"?auxOk:fetchOk;
+    complete(e.id=="switch.aux"?auxOk:fetchOk);
 }
 '''
 policy_tests = r'''
-static void sweep(){for(int i=0;i<MAX_ENTITIES+2;++i)refreshTick();}
+static void sweep(){for(int i=0;i<MAX_ENTITIES*3+2;++i){completeRead();refreshTick();}}
 int main(){
     // Audio never shuts down during playback; idle begins after input timeout.
     now=14999;connectedPowerTick();assert(!idle && g_audioQuiet && dacOff==1 && pinWrites==1);
@@ -170,13 +199,14 @@ int main(){
     g_backlightPhase=BacklightPhase::Normal;connectedPowerTick();assert(!idle);
     // Off sleeps the panel after brightness zero. Wake repaints in darkness.
     panelEvents.clear();applyBacklightPlan({BacklightPhase::Off,0});
-    assert(g_lcdSleeping && panelEvents==std::vector<String>({"brightness=0","sleep"}));
+    assert(g_lcdSleeping && suspended && panelEvents==std::vector<String>({"brightness=0","theme","paint","brightness=0","sleep"}));
     assert(beginDisplayRead());endDisplayRead(true);
-    assert(g_lcdSleeping && panelEvents[2]=="wake" && panelEvents[3]=="sleep");
+    assert(g_lcdSleeping && panelEvents[5]=="wake" && panelEvents[6]=="sleep");
     panelEvents.clear();applyBacklightPlan({BacklightPhase::Normal,5});
     assert(!g_lcdSleeping && panelEvents==std::vector<String>({"wake","brightness=0","theme","paint","brightness=5"}));
     panelEvents.clear();assert(!beginDisplayRead());endDisplayRead(false);assert(panelEvents.empty());
     applyBacklightPlan({BacklightPhase::Dim,1});assert(g_dimTheme && !g_lcdSleeping);
+    applyBacklightPlan({BacklightPhase::Normal,5});
     // Initial sweep includes all configured slots and AUX values, then remains quiet.
     now=20000;g_config.entityCount=4;
     g_cards[0].id="light.a";g_cards[0].aux.id="switch.aux";
@@ -208,6 +238,22 @@ int main(){
     onHaState(state);assert(g_cards[0].state=="on" && g_cards[2].state=="on");
     assert(g_cards[2].aux.state=="on");
     assert(g_cards[1].aux.state=="on" && g_cards[0].name=="Custom");
+    // Pause invalidates all values and freezes redraws/events/REST, including
+    // an old read completing after wake. The next sweep refreshes the visible page first.
+    g_cards[0].available=g_cards[0].aux.available=true;
+    requestEntityRefresh("light.a");now+=1500;refreshTick();assert(pendingState);
+    int before=draws;auto oldState=g_cards[0].state;
+    applyBacklightPlan({BacklightPhase::Dim,1});
+    assert(suspended && !g_cards[0].available && !g_cards[0].aux.available);
+    assert(!g_refreshInFlight && g_refreshAuxIndex==-1 && !g_refreshPending[0]);
+    state.state="ignored";onHaState(state);assert(g_cards[0].state==oldState);
+    renderDirty();assert(draws==before);refreshTick();assert(pendingState);
+    applyBacklightPlan({BacklightPhase::Normal,5});completeRead();
+    assert(!suspended && !g_cards[0].available && g_cards[0].state==oldState);
+    assert(!g_refreshInFlight);sweep();
+    g_config.entityCount=16;g_cards[8].id="switch.visible";g_page=1;
+    reads.clear();onHaAuth();sweep();
+    assert(!reads.empty() && reads.front()=="switch.visible");
     std::puts("PASS: actual idle/audio policy, dark LCD wake/read sequencing, targeted REST, AUX races/errors, retry backoff, offline/reconnect and duplicate states");
 }
 '''
@@ -224,8 +270,8 @@ with tempfile.TemporaryDirectory(prefix='m5-connected-power-') as directory:
     subprocess.run(flags+[str(tmp/'deadline.cpp'),'-o',str(tmp/'deadline')],check=True)
     subprocess.run([str(tmp/'deadline')],check=True)
     signatures=['static void quietAudio(', 'static void playUiSound(', 'static void connectedPowerTick(',
-                'bool beginDisplayRead(', 'void endDisplayRead(', 'static void applyBacklightPlan(',
-                'static void renderDirty(', 'static void requestEntityRefresh(', 'static void onHaAuth(', 'static void onHaState(', 'static void refreshTick(']
-    (tmp/'policy.cpp').write_text(policy_prefix+''.join(function(s) for s in signatures)+policy_tests)
+                'bool beginDisplayRead(', 'void endDisplayRead(', 'static bool setDisplayDataSuspended(bool suspended) {', 'static void applyBacklightPlan(',
+                'static void renderDirty(', 'static void requestEntityRefresh(', 'static void onHaAuth(', 'static void onHaState(', 'static void finishRefreshRead(', 'static void refreshTick(']
+    (tmp/'policy.cpp').write_text(policy_prefix+main[main.index('static bool g_refreshInFlight ='):main.index('static bool setDisplayDataSuspended(bool suspended) {')]+''.join(function(s) for s in signatures)+policy_tests)
     subprocess.run(flags+[str(tmp/'policy.cpp'),'-o',str(tmp/'policy')],check=True)
     subprocess.run([str(tmp/'policy')],check=True)

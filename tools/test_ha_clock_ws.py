@@ -28,7 +28,10 @@ static uint32_t millis(){return static_cast<uint32_t>(nowMs);}
 static int64_t esp_timer_get_time(){return nowMs*1000;}
 struct {template<class... T>void printf(const char*,T...){} void println(const char*){}} Serial;
 static std::vector<std::string> sent;
-struct {void loop(){} void disconnect(){} } ws;
+static void pollHttpWork(){}
+static bool g_dataSuspended=false,g_wsResumePending=false;
+static uint32_t g_dataGeneration=0,g_discardedHttp=0;
+struct {int loops=0;void loop(){++loops;} void disconnect(){} void setReconnectInterval(int){} } ws;
 enum WStype_t {WStype_CONNECTED,WStype_DISCONNECTED,WStype_TEXT,WStype_ERROR};
 static constexpr int WL_CONNECTED=3;
 struct {int status(){return WL_CONNECTED;}} WiFi;
@@ -66,6 +69,10 @@ static void clockEvent(uint32_t id,int64_t epoch,int offset,const char* zone,boo
     std::string json;serializeJson(event,json);message(json);
 }
 int main(){
+    g_dataSuspended=true;int loops=ws.loops;
+    haLoop();assert(ws.loops==loops && sent.empty());
+    message(R"({"type":"auth_required"})");assert(sent.empty());
+    g_dataSuspended=false;
     assert(!haClockReady() && haLocalTimeText()=="Unavailable");
     wsEvent(WStype_CONNECTED,nullptr,0);
     assert(g_linkStats.connections==1 && g_linkStats.lastConnectMs==1000 && !lastOnline);
@@ -120,7 +127,7 @@ int main(){
     assert(g_linkStats.disconnects==1 && g_linkStats.lastDisconnectMs==nowMs);
     assert(g_linkStats.lastDisconnectTime==disconnectedAt);
     status=haConnectionStatus();
-    assert(status.find("wifi_connected=1 ws_connected=0")!=std::string::npos);
+    assert(status.find("wifi_connected=1")!=std::string::npos && status.find("ws_connected=0")!=std::string::npos);
     assert(status.find("ws_disconnects=1")!=std::string::npos);
     wsEvent(WStype_CONNECTED,nullptr,0);message(R"({"type":"auth_ok"})");
     assert(lastOnline && haWsConnected() && g_linkStats.connections==2);

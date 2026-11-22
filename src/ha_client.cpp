@@ -20,6 +20,11 @@
 
 static WebSocketsClient ws;
 static bool g_wsStarted = false;
+static bool g_dataSuspended = false, g_wsResumePending = false;
+static uint32_t g_dataGeneration = 0, g_discardedHttp = 0;
+
+bool haDataSuspended() { return g_dataSuspended; }
+uint32_t haDataGeneration() { return g_dataGeneration; }
 static bool g_wsAuthed = false;
 static uint32_t g_wsMessageId = 1;
 static uint32_t g_wsClockId = 0;
@@ -73,6 +78,9 @@ String haClockStatus() {
 
 String haConnectionStatus() {
     String text = "wifi_connected=" + String(WiFi.status() == WL_CONNECTED ? 1 : 0);
+    text += " ha_data_suspended=" + String(g_dataSuspended ? 1 : 0);
+    text += " ha_data_generation=" + String(g_dataGeneration);
+    text += " ha_http_discarded=" + String(g_discardedHttp);
     text += " ws_connected=" + String(haWsConnected() ? 1 : 0);
     text += " ws_connections=" + String(g_linkStats.connections);
     text += " ws_disconnects=" + String(g_linkStats.disconnects);
@@ -273,29 +281,51 @@ static String escapeHtml(const String& in) {
 // ---------------------------------------------------------------------
 //  HTTP (initial state fetch and service calls)
 // ---------------------------------------------------------------------
-// HTTP owns its clients on a worker. The caller keeps servicing the WebSocket
-// on the main thread, so callbacks never race with the UI or entity cache.
+// The worker owns only request snapshots and result buffers. All entity/cache
+// changes, power guards, LEDs and completions belong to the main loop.
 struct HttpWork {
-    std::function<bool()> operation;
-    std::atomic<bool> done{false};
-    bool ok = false;
+    std::function<bool(HttpWork&)> operation;
+    std::function<void(bool, const String&, int)> complete;
+    std::atomic<bool> done{false}, cancelled{false};
+    bool used = false, command = false, ok = false, powerHeld = false;
+    String entityId, response;
+    int status = 0;
+    uint64_t order = 0;
+    uint32_t started = 0, generation = 0;
 };
+static constexpr unsigned HTTP_WORK_LIMIT = 8;
+static HttpWork g_httpWork[HTTP_WORK_LIMIT];
+static HttpWork* g_httpActive = nullptr;
 static QueueHandle_t g_httpQueue = nullptr;
-static bool g_httpWaiting = false;
+static uint64_t g_httpOrder = 0;
 
 static void httpWorkerTask(void*) {
     for (;;) {
         HttpWork* work = nullptr;
         if (xQueueReceive(g_httpQueue, &work, portMAX_DELAY) == pdTRUE) {
-            work->ok = work->operation();
+            work->ok = !work->cancelled.load(std::memory_order_acquire) && work->operation(*work);
             work->done.store(true, std::memory_order_release);
         }
     }
 }
 
-static bool runHttpWork(std::function<bool()> operation) {
-    ConnectedPowerWork powerWork;
-    if (g_httpWaiting) return false;
+bool haHttpBusy() {
+    for (const auto& work : g_httpWork) if (work.used) return true;
+    return false;
+}
+
+static bool runHttpWork(std::function<bool(HttpWork&)> operation,
+                        std::function<void(bool, const String&, int)> complete,
+                        bool command = false, const String& entityId = "") {
+    // Background reads never queue behind commands. State-based commands for
+    // one entity cannot overlap and calculate a second value from stale state.
+    if (g_dataSuspended || (!command && haHttpBusy())) return false;
+    HttpWork* slot = nullptr;
+    for (auto& work : g_httpWork) {
+        if (command && work.used && work.command && work.entityId == entityId) return false;
+        if (!work.used && !slot) slot = &work;
+    }
+    if (!slot) return false;
     if (!g_httpQueue) {
         g_httpQueue = xQueueCreate(1, sizeof(HttpWork*));
         if (!g_httpQueue) return false;
@@ -305,24 +335,106 @@ static bool runHttpWork(std::function<bool()> operation) {
             return false;
         }
     }
-    HttpWork work;
-    work.operation = std::move(operation);
-    HttpWork* queued = &work;
-    if (xQueueSend(g_httpQueue, &queued, 0) != pdTRUE) return false;
-    g_httpWaiting = true;
-    while (!work.done.load(std::memory_order_acquire)) {
-        haLoop();
-        delay(1);
-    }
-    g_httpWaiting = false;
-    return work.ok;
+    slot->operation = std::move(operation);
+    slot->complete = std::move(complete);
+    slot->command = command;
+    slot->entityId = entityId;
+    slot->response = "";
+    slot->status = 0;
+    slot->ok = false;
+    slot->powerHeld = false;
+    slot->done.store(false, std::memory_order_relaxed);
+    slot->cancelled.store(false, std::memory_order_relaxed);
+    slot->generation = g_dataGeneration;
+    slot->order = ++g_httpOrder;
+    slot->used = true;
+    return true;
 }
 
-static bool httpRequestBlocking(const String& method, const String& path,
-                                const String& body, String& response, int& status) {
-    if (!configComplete()) return false;
+static void pollHttpWork() {
+    if (g_httpActive && g_httpActive->done.load(std::memory_order_acquire)) {
+        HttpWork& work = *g_httpActive;
+        bool current = work.generation == g_dataGeneration;
+        bool ok = current && work.ok;
+        if (!current) ++g_discardedHttp;
+        int status = work.status;
+        String response = std::move(work.response);
+        auto complete = std::move(work.complete);
+        if (work.command && current) {
+            g_linkStats.lastCommandStatus = status;
+            g_linkStats.lastCommandMs = millis() - work.started;
+            if (!ok) ++g_linkStats.commandFailures;
+            Serial.printf("[ha] command status=%d duration=%lums ws=%d\n", status,
+                          static_cast<unsigned long>(g_linkStats.lastCommandMs), haWsConnected());
+        }
+        work.operation = nullptr;
+        work.entityId = "";
+        work.used = false;
+        g_httpActive = nullptr;
+        if (work.powerHeld) {
+            work.powerHeld = false;
+            endConnectedPowerWork();
+        }
+        if (complete) complete(ok, response, status);
+    }
+    if (g_httpActive) return;
+    HttpWork* next = nullptr;
+    for (auto& work : g_httpWork) {
+        if (!work.used) continue;
+        if (!next || (work.command && !next->command) ||
+            (work.command == next->command && work.order < next->order)) next = &work;
+    }
+    if (!next) return;
+    g_httpActive = next;
+    next->started = millis();
+    beginConnectedPowerWork();
+    next->powerHeld = true;
+    if (next->command && g_commandCb) g_commandCb();
+    if (xQueueSend(g_httpQueue, &next, 0) != pdTRUE) {
+        next->done.store(true, std::memory_order_release);
+    }
+}
 
-    String url = g_config.haUrl + path;
+void haSetDataSuspended(bool suspended) {
+    if (g_dataSuspended == suspended) return;
+    g_dataSuspended = suspended;
+    ++g_dataGeneration;
+    if (suspended) {
+        g_wsResumePending = false;
+        g_wsAuthed = g_stateSubscribed = false;
+        g_wsClockId = g_wsStateId = 0;
+        if (g_httpActive) {
+            g_httpActive->cancelled.store(true, std::memory_order_release);
+            // A slow cancelled transfer must not hold the CPU/radio awake.
+            if (g_httpActive->powerHeld) {
+                g_httpActive->powerHeld = false;
+                endConnectedPowerWork();
+            }
+        }
+        if (g_wsStarted) ws.disconnect();
+        notifyStatus(false);
+        // The worker may still own the active request; never free or reuse it.
+        // Queued operations have not reached HA and can be cancelled immediately.
+        for (auto& work : g_httpWork) {
+            if (!work.used || &work == g_httpActive) continue;
+            auto complete = std::move(work.complete);
+            work.operation = nullptr;
+            work.response = work.entityId = "";
+            work.used = false;
+            ++g_discardedHttp;
+            if (complete) complete(false, "", 0);
+        }
+    } else {
+        g_linkStats.lastLoopMs = 0; // Suspension is not a WebSocket scheduling stall.
+        g_wsResumePending = g_wsStarted;
+        if (g_wsResumePending) ws.setReconnectInterval(0);
+    }
+}
+
+static bool httpRequestBlocking(const String& baseUrl, const String& token,
+                                const String& method, const String& path,
+                                const String& body, String& response, int& status) {
+    String url = baseUrl + path;
     bool tls = url.startsWith("https://");
 
     HTTPClient http;
@@ -338,7 +450,7 @@ static bool httpRequestBlocking(const String& method, const String& path,
     http.setTimeout(tls ? 4000 : 1200);
     http.setConnectTimeout(tls ? 4000 : 1200);
     http.setReuse(false);
-    http.addHeader("Authorization", "Bearer " + g_config.haToken);
+    http.addHeader("Authorization", "Bearer " + token);
 
     int code;
     if (method == "GET") {
@@ -362,52 +474,31 @@ static bool httpRequestBlocking(const String& method, const String& path,
     return ok;
 }
 
-static bool httpRequest(const String& method, const String& path,
-                        const String& body, String& response) {
-    int status = 0;
-    bool command = method != "GET";
-    if (command && g_commandCb) g_commandCb();
-    uint32_t started = millis();
-    bool ok = runHttpWork([&]() {
-        return httpRequestBlocking(method, path, body, response, status);
-    });
-    if (command) {
-        g_linkStats.lastCommandStatus = status;
-        g_linkStats.lastCommandMs = millis() - started;
-        if (!ok) ++g_linkStats.commandFailures;
-        Serial.printf("[ha] command status=%d duration=%lums ws=%d\n", status,
-                      static_cast<unsigned long>(g_linkStats.lastCommandMs), haWsConnected());
-    }
-    return ok;
-}
-
-bool haFetchState(EntityState& entity) {
+bool haFetchState(EntityState& entity, HaResultCallback complete) {
     if (!configComplete() || entity.id.isEmpty()) return false;
-
-    uint32_t revision = entity.revision;
-    String body;
-    if (!httpRequest("GET", "/api/states/" + entity.id, "", body)) {
-        if (entity.revision != revision) return true;
-        entity.available = false;
-        return false;
-    }
-    // A state event received while HTTP was waiting is newer than this snapshot.
-    if (entity.revision != revision) return true;
-
-    JsonDocument doc;
-    if (deserializeJson(doc, body)) {
-        entity.available = false;
-        return false;
-    }
-
-    parseState(entity, doc.as<JsonVariantConst>());
-    return true;
+    const String id = entity.id, url = g_config.haUrl, token = g_config.haToken;
+    const uint32_t revision = entity.revision, generation = g_dataGeneration;
+    return runHttpWork([url, token, id](HttpWork& work) {
+        return httpRequestBlocking(url, token, "GET", "/api/states/" + id, "",
+                                   work.response, work.status);
+    }, [&entity, id, revision, generation, complete](bool ok, const String& body, int) {
+        if (generation != g_dataGeneration) { if (complete) complete(false); return; }
+        // Live updates received after submission always win, even after errors.
+        if (entity.id != id) { if (complete) complete(false); return; }
+        if (entity.revision != revision) { if (complete) complete(true); return; }
+        if (ok) {
+            JsonDocument doc;
+            ok = !deserializeJson(doc, body);
+            if (ok) parseState(entity, doc.as<JsonVariantConst>());
+        }
+        if (!ok) entity.available = false;
+        if (complete) complete(ok);
+    });
 }
 
-static bool fetchEntityOptionsBlocking(String& optionsHtml, int maxOptions) {
-    if (!configComplete()) return false;
-
-    String url = g_config.haUrl + "/api/states";
+static bool fetchEntityOptionsBlocking(const String& baseUrl, const String& token,
+                                       String& optionsHtml, int maxOptions) {
+    String url = baseUrl + "/api/states";
     bool tls = url.startsWith("https://");
 
     HTTPClient http;
@@ -422,7 +513,7 @@ static bool fetchEntityOptionsBlocking(String& optionsHtml, int maxOptions) {
     http.setTimeout(tls ? 8000 : 5000);
     http.setConnectTimeout(tls ? 6000 : 3000);
     http.setReuse(false);
-    http.addHeader("Authorization", "Bearer " + g_config.haToken);
+    http.addHeader("Authorization", "Bearer " + token);
 
     int code = http.GET();
     if (code != 200) {
@@ -465,24 +556,32 @@ static bool fetchEntityOptionsBlocking(String& optionsHtml, int maxOptions) {
     return added > 0;
 }
 
-bool haFetchEntityOptions(String& optionsHtml, int maxOptions) {
-    return runHttpWork([&]() { return fetchEntityOptionsBlocking(optionsHtml, maxOptions); });
+bool haFetchEntityOptions(HaOptionsCallback complete, int maxOptions) {
+    if (!configComplete()) return false;
+    const String url = g_config.haUrl, token = g_config.haToken;
+    return runHttpWork([url, token, maxOptions](HttpWork& work) {
+        return fetchEntityOptionsBlocking(url, token, work.response, maxOptions);
+    }, [complete](bool ok, const String& options, int) {
+        if (complete) complete(ok, options);
+    });
 }
 
 bool haCallService(const String& domain, const String& service,
-                   const String& entityId, const String& extraJson) {
+                   const String& entityId, const String& extraJson,
+                   HaResultCallback complete) {
     if (!configComplete() || domain.isEmpty() || service.isEmpty() || entityId.isEmpty()) {
         return false;
     }
-
     String body = "{\"entity_id\":\"" + entityId + "\"";
     if (!extraJson.isEmpty()) body += "," + extraJson;
     body += "}";
-
-    String response;
-    bool ok = httpRequest("POST", "/api/services/" + domain + "/" + service, body, response);
-    if (!ok) Serial.printf("[ha] service %s.%s failed\n", domain.c_str(), service.c_str());
-    return ok;
+    const String url = g_config.haUrl, token = g_config.haToken;
+    const String path = "/api/services/" + domain + "/" + service;
+    return runHttpWork([url, token, path, body](HttpWork& work) {
+        return httpRequestBlocking(url, token, "POST", path, body, work.response, work.status);
+    }, [complete](bool ok, const String&, int) {
+        if (complete) complete(ok);
+    }, true, entityId);
 }
 
 // ---------------------------------------------------------------------
@@ -563,6 +662,7 @@ static void wsSubscribe() {
 }
 
 static void wsHandleText(const uint8_t* payload, size_t length) {
+    if (g_dataSuspended) return;
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, (const char*)payload, length);
     if (err) return;
@@ -689,6 +789,7 @@ static void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
 }
 
 void haBegin() {
+    if (g_dataSuspended) return;
     if (!configComplete()) {
         Serial.println("[ha] ws not started: missing url or token");
         return;
@@ -724,6 +825,8 @@ void haBegin() {
 }
 
 void haLoop() {
+    pollHttpWork();
+    if (g_dataSuspended) return;
     if (g_wsStarted) {
         uint64_t now = clockMillis();
         if (g_linkStats.lastLoopMs) {
@@ -732,6 +835,10 @@ void haLoop() {
         }
         g_linkStats.lastLoopMs = now;
         ws.loop();
+        if (g_wsResumePending) {
+            ws.setReconnectInterval(5000);
+            g_wsResumePending = false;
+        }
     }
     if (g_wsAuthed && !g_stateSubscribed && (int32_t)(millis() - g_stateRetryAt) >= 0) {
         if (g_wsStateId) {

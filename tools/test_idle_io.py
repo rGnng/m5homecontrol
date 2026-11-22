@@ -127,6 +127,7 @@ int main(){
     now=40;key('9');assert(!keypadPoll());
     now=60;interruptHandler();assert(!keypadPoll() && g_keypadIrqVerified);
     g_lastKeyPoll=UINT32_MAX-5;now=14;key('8');assert(keypadPoll()=='2');
+    resetKeypad();keypadInit();now=20;key('.');assert(keypadPoll()==KEYPAD_DIM_KEY && g_keypadIrqVerified);
     resetKeypad();board=m5::board_t::other;keypadInit();assert(!interruptHandler && pinModes==0);
     now=20;key('7',false);assert(keypadPoll()=='1');
     resetKeypad();present=false;keypadInit();assert(!interruptHandler && pinModes==0);

@@ -7,6 +7,7 @@
 #include <Preferences.h>
 #include <Update.h>
 #include <esp_system.h>
+#include <esp_wifi.h>
 
 #include "ha_client.h"
 #include "connected_power.h"
@@ -352,21 +353,27 @@ static String powerIcon() {
     return svg + "</svg>";
 }
 
+static String g_cachedEntityOptions;
+static uint32_t g_entityOptionsAt = 0;
+static bool g_entityOptionsLoading = false;
+
+static void refreshEntityOptions() {
+    if (haDataSuspended() || g_apMode || WiFi.status() != WL_CONNECTED || g_config.haToken.isEmpty() ||
+        g_entityOptionsLoading || (!g_cachedEntityOptions.isEmpty() &&
+        millis() - g_entityOptionsAt < 60000)) return;
+    g_entityOptionsLoading = haFetchEntityOptions([](bool ok, const String& options) {
+        g_entityOptionsLoading = false;
+        if (ok) {
+            g_cachedEntityOptions = options;
+            g_entityOptionsAt = millis();
+        }
+    }, 300);
+}
+
 static void handleRoot() {
     ConnectedPowerWork powerWork;
-    static String cachedOptions;
-    static uint32_t cachedAt = 0;
-    bool optionsLoaded = false;
-
-    if (!g_apMode && WiFi.status() == WL_CONNECTED && !g_config.haToken.isEmpty()) {
-        if (cachedOptions.isEmpty() || millis() - cachedAt > 60000) {
-            cachedOptions = "";
-            if (haFetchEntityOptions(cachedOptions, 300)) {
-                cachedAt = millis();
-            }
-        }
-        optionsLoaded = !cachedOptions.isEmpty();
-    }
+    refreshEntityOptions();
+    const bool optionsLoaded = !g_cachedEntityOptions.isEmpty();
 
     server.sendHeader("Cache-Control", "no-store");
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
@@ -469,15 +476,14 @@ static void handleRoot() {
     page += "<div class=\"col right\">";
     page += "<fieldset><legend>Entity List</legend>";
 
-    if (optionsLoaded) {
-        page += "<datalist id=\"entity-list\">";
-        page += cachedOptions;
-        page += "</datalist>";
-    } else if (g_config.haToken.isEmpty()) {
+    page += "<datalist id=\"entity-list\">";
+    page += g_cachedEntityOptions;
+    page += "</datalist>";
+    if (!optionsLoaded && g_config.haToken.isEmpty()) {
         page += "<p>Configure the Home Assistant token to load the entity selector. "
                 "Manual entity IDs also work.</p>";
-    } else {
-        page += "<p>Could not load entities from Home Assistant. Manual entity IDs still work.</p>";
+    } else if (!optionsLoaded) {
+        page += "<p id=\"entity-load-status\">Loading entities from Home Assistant. Manual entity IDs also work.</p>";
     }
 
     page += "<input type=\"hidden\" name=\"pagecount\" id=\"pagecount\" value=\"" +
@@ -573,6 +579,24 @@ static void handleRoot() {
     page += "<div class=\"actions\"><button type=\"submit\">Save and reboot</button></div>";
     page += "</div></div>";
 
+    page += R"HTML(<script>
+(async function loadEntities() {
+  for (let attempt = 0; attempt < 25; ++attempt) {
+    try {
+      const response = await fetch('/entities', {cache: 'no-store'});
+      if (response.status === 200) {
+        document.getElementById('entity-list').innerHTML = await response.text();
+        document.getElementById('entity-load-status')?.remove();
+        return;
+      }
+      if (response.status !== 202) break;
+    } catch (_) { break; }
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  const status = document.getElementById('entity-load-status');
+  if (status) status.textContent = 'Could not load entities. Manual entity IDs still work.';
+})();
+</script>)HTML";
     page += R"JS(
 <script>
 const MAX_PAGES = )JS";
@@ -1123,6 +1147,13 @@ static void startWebServer() {
     if (!g_routesReady) {
         server.on("/", HTTP_GET, handleRoot);
         server.on("/save", HTTP_POST, handleSave);
+        server.on("/entities", HTTP_GET, []() {
+            refreshEntityOptions();
+            server.sendHeader("Cache-Control", "no-store");
+            if (!g_cachedEntityOptions.isEmpty()) server.send(200, "text/html", g_cachedEntityOptions);
+            else if (g_config.haToken.isEmpty() || g_apMode || haDataSuspended()) server.send(503, "text/plain", "Unavailable");
+            else server.send(202, "text/plain", "Loading");
+        });
         server.on("/screenshot.bmp", HTTP_GET, handleScreenshot);
         server.on("/power", HTTP_GET, []() {
             server.sendHeader("Cache-Control", "no-store");
@@ -1144,6 +1175,9 @@ static void startWebServer() {
             String text = "board=" + String((int)M5.getBoard());
             text += " uptime_ms=" + String(millis());
             text += " reset_reason=" + String(static_cast<int>(esp_reset_reason()));
+            wifi_config_t station = {};
+            text += " wifi_listen_interval=" + String(esp_wifi_get_config(WIFI_IF_STA, &station) == ESP_OK
+                ? station.sta.listen_interval : 0);
             text += " free_heap=" + String(ESP.getFreeHeap());
             text += " min_free_heap=" + String(ESP.getMinFreeHeap());
             text += " " + menuStatus();
@@ -1216,7 +1250,17 @@ void networkBegin() {
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(true);  // WIFI_PS_MIN_MODEM: retain association and HA connection.
     WiFi.setHostname(g_config.hostname.c_str());
-    WiFi.begin(g_config.ssid.c_str(), g_config.pass.c_str());
+    // Configure credentials without associating, then set the listen interval
+    // before connection. No-argument begin() preserves it on every retry.
+    WiFi.begin(g_config.ssid.c_str(), g_config.pass.c_str(), 0, nullptr, false);
+    wifi_config_t station = {};
+    if (esp_wifi_get_config(WIFI_IF_STA, &station) == ESP_OK) {
+        station.sta.listen_interval = 10;
+        if (esp_wifi_set_config(WIFI_IF_STA, &station) != ESP_OK) {
+            Serial.println("[net] could not configure Wi-Fi listen interval");
+        }
+    }
+    WiFi.begin();
     g_apMode = false;
     g_connectStart = millis();
     g_lastReconnect = millis();
@@ -1250,7 +1294,7 @@ void networkLoop() {
         g_lastReconnect = millis();
         Serial.printf("[net] retry WiFi status=%d\n", (int)WiFi.status());
         WiFi.disconnect();
-        WiFi.begin(g_config.ssid.c_str(), g_config.pass.c_str());
+        WiFi.begin();
     }
 }
 

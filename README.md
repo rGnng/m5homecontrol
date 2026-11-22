@@ -66,7 +66,8 @@ A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 - Center: page squares, active page highlighted
 - Right: combined Wi-Fi / HA link icon, then the battery icon
 - Wi-Fi is not configured: dim signal icon, blinking
-- While connecting, retrying, or disconnected: the signal icon blinks; no red X
+- While normal and connecting, retrying, or disconnected: the signal icon blinks; no red X
+- In dim/off, the status bar freezes; the deliberate HA pause does not blink
 - The icon follows Wi-Fi and the authenticated HA WebSocket; a failed entity
   command does not change connection status
 - Confirmed Core USB charging: bolt inside the battery icon
@@ -163,20 +164,34 @@ so actual dock charging detection requires a hardware status connection.
 
 ### Connected power saving
 
-The remote stays connected and accepts HA updates, web configuration, and OTA.
-It does not enter ESP32 deep sleep or light sleep, and does not use the inferred
-dock hint to change its power policy.
+In normal display mode, the remote accepts live HA updates. Dim and off suspend
+HA data, show `--` for entity values, and freeze the status bar. Wi-Fi stays
+associated so web configuration, display previews, screenshots and OTA remain
+reachable. The remote does not enter ESP32 deep sleep or light sleep, and does
+not use the inferred dock hint to change its power policy.
 
-- Wi-Fi uses minimum modem power saving while retaining its association and
-  WebSocket heartbeat. Larger HTTP transfers temporarily disable modem sleep
-  and restore its previous setting afterward.
+- Normal display mode uses minimum Wi-Fi modem sleep. Dim/off use maximum
+  modem sleep with a listen interval of ten AP beacon intervals. Larger HTTP
+  transfers temporarily disable modem sleep, then restore the mode required by
+  the current display state. Web access can have higher latency in dim/off.
+- Entering dim/off disconnects the HA WebSocket, stops HA reconnects, heartbeats,
+  subscriptions and REST reads, and cancels queued commands and entity-list
+  downloads. An HTTP request already running may finish, but its result is
+  discarded even if the display wakes before it returns.
+- Values in all configured menu rows and AC detail controls become `--`, with
+  names retained. The dim screen is painted once and stays static. Entering off
+  directly also clears displayed values before the LCD sleeps.
+- Waking restores normal networking, reconnects HA, and refreshes the visible
+  page before other pages. Each value stays `--` until fresh data arrives;
+  controls for stale or unavailable entities do not send commands.
 - After 15 seconds without input, or when the display is dim/off, CPU speed
   drops to 80 MHz. Input and sounds restore 160 MHz. Both speeds share the
   ESP32's 320 MHz PLL, selected before Wi-Fi starts. HTTP work, web
   configuration, and screenshots temporarily restore that
   speed; firmware uploads keep it restored until upload completion.
 - Display off sends the LCD controller to sleep as well as setting backlight
-  brightness to zero. Wake repaints cached HA state before lighting the screen.
+  brightness to zero. Wake paints `--` before lighting the screen; asynchronous
+  HA results then fill in the values.
   Screenshot reads temporarily wake the controller with the backlight off.
 - The speaker task and DAC stop one second after a sound finishes. GPIO25 is
   driven low on Core Basic. This quiets the signal path; the board does not
@@ -191,12 +206,15 @@ dock hint to change its power policy.
   apply immediately.
 - PMIC sampling slows from 500 ms to 5 seconds while idle. Explicit battery
   refresh bypasses the sample cache.
-- HA sends state updates only for configured primary and AUX entities. Commands
-  queue a delayed REST check of matching slots, rather than every page. Full
+- While normal, HA sends state updates only for configured primary and AUX
+  entities. Commands queue a delayed REST check of matching slots, rather than
+  every page. Full
   reconciliation runs every 30 minutes while subscribed, or every 30 seconds
   if live state updates are unavailable. Failed reads retry after 15 seconds.
 
-`/diag` reports `power_idle`, actual `cpu_mhz`, `wifi_sleep`, `lcd_sleep`,
+`/diag` reports `ha_data_suspended`, `ha_data_generation`, `ha_http_discarded`,
+`entity_values_ready`, `aux_values_ready`, `wifi_listen_interval`,
+`power_idle`, actual `cpu_mhz`, `wifi_sleep`, `lcd_sleep`,
 `audio_quiet`, polling intervals, REST counters, `ws_state_ready`, watched entity
 count, state events, and subscription errors. Power saving on the dock can be
 verified through these states, but battery runtime or current savings need an
@@ -225,15 +243,23 @@ disable it. If dimming is disabled, the off timeout counts from the last input.
 | Display state | Appearance | First device key press |
 | --- | --- | --- |
 | Normal | Selected theme and scheduled brightness | Performs its action and resets idle time |
-| Dim | Black background, faint grey text, subdued selection and icons | Restores the normal view and performs its action |
+| Dim | Black background, faint grey text, all values `--`, static icons | Wakes; refreshes the action target, then performs the requested action once |
 | Off | Backlight off | Wakes the display only; release and press again to act |
 
 These rules cover the Core buttons, keypad, and serial navigation keys. A Core
 A/B/C press used to wake an off display is suppressed until release; holding B
-cannot open a detail panel during that wake press.
+cannot open a detail panel during that wake press. In dim, navigation works on
+the first press. A short B press or keypad/serial action captures its original
+entity and control, refreshes that entity asynchronously, and then acts once.
+Moving focus or changing pages while the read is pending does not redirect the
+action. A failed/unavailable refresh, another suspension, or a ten-second timeout
+skips the action. Extra actions for the same target are ignored while the check
+is pending. Holding B in dim opens/closes detail without also toggling on release.
 
-Incoming HA values, clock updates, and day/night transitions do not wake or
-brighten a dim/off display. Background scheduling may make it darker or turn it off.
+HA values and clock messages are suspended in dim/off. The local monotonic clock
+continues advancing from its last HA sample, so idle deadlines and day/night
+scheduling still run. Background scheduling may make the display darker or turn
+it off; it does not wake or brighten it.
 Web **Wake**, **Dim**, and **Off** preview the display using saved brightness
 settings without saving or running an entity action. Device input clears the
 preview, resets idle time, and restores the normal view.
@@ -248,8 +274,9 @@ Time updates are pushed by HA; there is no periodic REST time poll or NTP server
 - HA's configured timezone and current offset determine the day/night schedule,
   including daylight saving and timezone changes while connected
 - A 64-bit monotonic clock advances time between updates and while disconnected
-- While offline, the last known offset is retained; timezone/DST changes are
-  learned after reconnection, when a fresh clock subscription is created
+- While offline or suspended in dim/off, the last known offset is retained;
+  timezone/DST changes are learned after reconnection, when a fresh clock
+  subscription is created
 - Failed or invalid clock updates trigger a subscription retry after 30 seconds;
   a subscription with no valid update for three minutes is recreated
 - Until the first valid time sample, the configured fallback brightness is used
@@ -282,7 +309,9 @@ Enter your Home Assistant base URL, such as `http://<ha-host>:8123`.
 When a token is configured and Wi-Fi is up, the web page downloads
 `/api/states` and fills a shared `<datalist>`. Start typing in an entity field
 or open the list. Manual entity IDs still work if the list cannot be loaded.
-The entity list is cached for 60 seconds.
+The entity list loads asynchronously after the configuration page opens and is
+cached for 60 seconds. Loading it does not pause device navigation. Dim/off stop
+new entity-list downloads; an already cached selector can still be served.
 
 ## Web configuration
 
@@ -316,6 +345,7 @@ working memory. Capturing does not wake the display or change pages.
 | Method and path | Purpose |
 | --- | --- |
 | `GET /` | Configuration form |
+| `GET /entities` | Cached entity selector HTML; `202` while loading, `503` if suspended with no cache |
 | `POST /save` | Save settings and reboot; the web form reconnects automatically |
 | `POST /display` | Preview the display with form field `mode=wake`, `dim`, or `off`; settings are not saved |
 | `GET /power` | Current approximate battery percentage as text |
@@ -340,6 +370,15 @@ Connection diagnostics include `wifi_connected`, `ws_connected`, `ws_connections
 event has been recorded. `ws_last_disconnect_time` also reports the disconnect
 in HA local time when available. `ws_loop_max_gap_ms` records the longest gap
 between WebSocket processing calls.
+
+HA HTTP requests run asynchronously. Navigation, display scheduling, web handling,
+and WebSocket updates continue while a command or state read is in progress.
+Completions apply on the main loop and preserve any newer live state. Up to eight
+requests can be outstanding; commands take priority over new background reads.
+Further commands for an entity already queued or running are ignored until it
+completes, so repeated presses cannot calculate changes from stale values.
+Commands are reconciled through a delayed state read even after an HTTP error,
+since HA may have acted before the response failed.
 
 `ha_command_failures`, `ha_last_command_status`, and `ha_last_command_ms` report
 service errors separately. Status is an HTTP code, a negative transport error,
@@ -388,6 +427,7 @@ Cursor movement wraps within the current page and skips empty menu slots.
 | r1c2 (M) / r1c3 (%) | Previous / next page, wrapping at either end; main menu only |
 | 1–8 | Select and run that main-menu slot; in AC detail, 1–7 only focus a control |
 | r3c4 (+) / r4c4 (−) | Increase / decrease the selected adjustable value |
+| r5c1 (.) | Dim the display and pause HA updates; another press stays dim. From off, wake only |
 | 0 | Cancel a temperature edit; otherwise return to the main menu |
 | r5c4 (=), short or long press | Open AC detail if available; otherwise toggle/run the selected entity. In AC detail, activate the control or confirm an edit |
 
@@ -400,7 +440,10 @@ r3      4    5    6    +
 r4      7    8    9    -
 ```
 
-There are eight menu slots, so 9 has no assigned slot.
+There are eight menu slots, so 9 has no assigned slot. The physical bottom-left
+`.` key (r5c1) dims from either the menu or AC detail; serial `.` still opens AC
+detail. This uses the same dim preview as web **Dim**, until another input wakes
+the device.
 
 ### Adjusting values
 
@@ -560,6 +603,7 @@ g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
   tools/test_backlight_schedule.cpp -o /tmp/m5-backlight-test
 /tmp/m5-backlight-test
 python3 tools/test_controls.py
+python3 tools/test_dim_actions.py
 g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
   src/ui_font_data.cpp tools/test_ui_font.cpp -o /tmp/m5-ui-font-test
 /tmp/m5-ui-font-test

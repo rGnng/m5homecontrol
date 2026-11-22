@@ -40,6 +40,7 @@ prefix = r'''
 #include <mutex>
 #include <sstream>
 #include <thread>
+#include <vector>
 void convertFromJson(JsonVariantConst source,String& out){out=source.as<std::string>();}
 static auto boot=std::chrono::steady_clock::now();
 static std::thread::id mainThread;
@@ -49,12 +50,15 @@ struct Queue {std::mutex mutex;std::condition_variable ready;void* item=nullptr;
 using QueueHandle_t=Queue*;
 static constexpr int pdTRUE=1,pdPASS=1,portMAX_DELAY=-1;
 static bool queueAvailable=true,taskAvailable=true,sendAllowed=true;
+static std::atomic<bool> workerAllowed{true};
 static int deletedQueues=0;
 static QueueHandle_t xQueueCreate(int,size_t){return queueAvailable?new Queue:nullptr;}
 static void vQueueDelete(QueueHandle_t q){delete q;++deletedQueues;}
 static int xQueueReceive(QueueHandle_t q,void* out,int){
     std::unique_lock<std::mutex> lock(q->mutex);q->ready.wait(lock,[&]{return q->item!=nullptr;});
-    *static_cast<void**>(out)=q->item;q->item=nullptr;return pdTRUE;
+    *static_cast<void**>(out)=q->item;q->item=nullptr;
+    while(!workerAllowed.load())std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    return pdTRUE;
 }
 static int xQueueSend(QueueHandle_t q,const void* in,int){
     std::lock_guard<std::mutex> lock(q->mutex);
@@ -66,15 +70,23 @@ static int xTaskCreate(void (*task)(void*),const char*,int,void*,int,void*){
     std::thread([task]{task(nullptr);}).detach();return pdPASS;
 }
 static bool socketConnected=true,g_haOnline=true;
+static bool g_dataSuspended=false,g_wsResumePending=false,g_wsStarted=true;
+static bool g_wsAuthed=true,g_stateSubscribed=true;
+static uint32_t g_wsClockId=1,g_wsStateId=2,g_dataGeneration=0,g_discardedHttp=0;
+bool haDataSuspended(){return g_dataSuspended;}
+uint32_t haDataGeneration(){return g_dataGeneration;}
+struct {void disconnect(){} void setReconnectInterval(int){} } ws;
+static void notifyStatus(bool){}
 static uint32_t lastPump=0;
 static int pumps=0,commandAnimations=0,httpCode=200,httpDelay=100;
-static bool nestedAttempt=false;
-static std::function<void()> onPump;
 bool haWsConnected(){return socketConnected;}
 static void animateCommand(){assert(std::this_thread::get_id()==mainThread);++commandAnimations;}
 static HaCommandCallback g_commandCb=animateCommand;
-struct {String haUrl="http://fake",haToken="fake-token";} g_config;
+struct {String haUrl="http://fake",haToken="fake-token";int entityCount=1;} g_config;
 static int powerWork=0,requestedRefreshes=0;
+static constexpr int MAX_ENTITIES=1;
+static bool g_dirty[MAX_ENTITIES]={};
+static EntityState g_cards[MAX_ENTITIES];
 void beginConnectedPowerWork(){++powerWork;}
 void endConnectedPowerWork(){--powerWork;}
 static void requestEntityRefresh(const String&){++requestedRefreshes;}
@@ -87,13 +99,16 @@ struct WiFiClient : std::istringstream {
 };
 struct WiFiClientSecure {void setInsecure(){}};
 static String httpBody="{}";
+struct ObservedRequest {String url,authorization,body;};
+static std::vector<ObservedRequest> observed;
 struct HTTPClient {
     WiFiClient stream;
-    template<class Client>void begin(Client&,const String&){}
+    String url,authorization,body;
+    template<class Client>void begin(Client&,const String& value){url=value;}
     void setTimeout(int){} void setConnectTimeout(int){} void setReuse(bool){}
-    void addHeader(const char*,const String&){}
-    int GET(){assert(std::this_thread::get_id()!=mainThread);delay(httpDelay);stream.str(httpBody);return httpCode;}
-    int POST(const String&){return GET();}
+    void addHeader(const char* name,const String& value){if(std::string(name)=="Authorization")authorization=value;}
+    int GET(){assert(std::this_thread::get_id()!=mainThread);observed.push_back({url,authorization,body});delay(httpDelay);stream.str(httpBody);return httpCode;}
+    int POST(const String& value){body=value;return GET();}
     String getString(){return httpBody;}
     WiFiClient& getStream(){return stream;}
     void end(){}
@@ -103,69 +118,136 @@ struct HTTPClient {
 stats = source[source.index('struct HaLinkStats {'):source.index('static uint64_t clockMillis(')]
 worker = source[source.index('struct HttpWork {'):source.index('static bool httpRequestBlocking(')]
 signatures = ['static String escapeHtml(', 'static bool httpRequestBlocking(',
-              'static bool httpRequest(', 'bool haFetchState(', 'static bool fetchEntityOptionsBlocking(',
+              'bool haFetchState(', 'static bool fetchEntityOptionsBlocking(',
               'bool haFetchEntityOptions(', 'bool haCallService(']
 tests = r'''
+static int navigationTicks=0;
 void haLoop(){
     assert(std::this_thread::get_id()==mainThread);
     const uint32_t now=millis();
     if(now-lastPump>50)socketConnected=false;
     lastPump=now;++pumps;
-    if(!nestedAttempt){nestedAttempt=true;assert(!runHttpWork([]{return true;}));}
-    if(onPump)onPump();
+    pollHttpWork();
+}
+static void tick(){
+    ++navigationTicks; // A normal main-loop iteration can still service input.
+    haLoop();delay(1);
+}
+static void drain(){
+    uint32_t deadline=millis()+3000;
+    while(haHttpBusy()){assert(millis()<deadline);tick();}
+    assert(powerWork==0);
 }
 int main(){
-    mainThread=std::this_thread::get_id();
-    // Resource failures return failure; they never fall back to blocking HTTP.
-    queueAvailable=false;assert(!runHttpWork([]{std::abort();return false;}));
+    mainThread=std::this_thread::get_id();lastPump=millis();
+    auto never=[](HttpWork&){std::abort();return false;};
+    queueAvailable=false;assert(!runHttpWork(never,nullptr));
     queueAvailable=true;taskAvailable=false;
-    assert(!runHttpWork([]{std::abort();return false;}) && deletedQueues==1);
-    taskAvailable=true;lastPump=millis();
-    assert(callService("climate","set_hvac_mode","climate.ac","\"hvac_mode\":\"cool\""));
-    assert(pumps>20 && socketConnected && g_haOnline && commandAnimations==1);
-    assert(powerWork==0 && requestedRefreshes==1);
-    assert(g_linkStats.lastCommandStatus==200 && g_linkStats.commandFailures==0);
-    assert(g_linkStats.lastCommandMs>=100);
-    // An HA service error does not change connection state or stop heartbeats.
-    pumps=0;httpCode=503;lastPump=millis();
-    assert(!callService("climate","set_hvac_mode","climate.ac"));
-    assert(pumps>20 && socketConnected && g_haOnline && commandAnimations==2);
-    assert(g_linkStats.lastCommandStatus==503 && g_linkStats.commandFailures==1);
-    httpCode=-11;lastPump=millis();
-    assert(!callService("climate","set_temperature","climate.ac"));
-    assert(socketConnected && g_haOnline && g_linkStats.lastCommandStatus==-11);
+    assert(!runHttpWork(never,nullptr) && deletedQueues==1);
+    taskAvailable=true;
+    bool completed=false,result=false;
+    auto completion=[&](bool ok){
+        assert(std::this_thread::get_id()==mainThread);completed=true;result=ok;
+    };
+    uint32_t started=millis();
+    assert(callService("climate","set_hvac_mode","climate.ac","\"hvac_mode\":\"cool\"",completion));
+    assert(millis()-started<50 && !completed && haHttpBusy());
+    assert(commandAnimations==0); // LED starts at dispatch, not submission.
+    drain();
+    assert(completed && result && navigationTicks>20 && pumps>20);
+    assert(socketConnected && g_haOnline && commandAnimations==1 && requestedRefreshes==1);
+    assert(g_linkStats.lastCommandStatus==200 && g_linkStats.lastCommandMs>=100);
+    // Service and transport failures complete asynchronously without changing link state.
+    for(int status:{503,-11}){
+        completed=false;httpCode=status;
+        assert(callService("climate","set_temperature","climate.ac","",completion));
+        assert(!completed);drain();assert(completed && !result);
+        assert(g_linkStats.lastCommandStatus==status && socketConnected && g_haOnline);
+    }
     assert(g_linkStats.commandFailures==2);
-    // REST reads and the filtered entity selector also use the HTTP worker.
-    httpCode=200;httpBody="{\"state\":\"cool\"}";String body;
-    pumps=0;lastPump=millis();
-    assert(httpRequest("GET","/api/states/climate.ac","",body));
-    assert(body==httpBody && pumps>20 && commandAnimations==3);
-    httpBody=R"([{"entity_id":"climate.ac","attributes":{"friendly_name":"A & B"}},{"entity_id":"light.test","attributes":{"friendly_name":"Light"}}])";
-    String options;pumps=0;lastPump=millis();
-    assert(haFetchEntityOptions(options,1));
-    assert(options=="<option value=\"climate.ac\">A &amp; B</option>");
-    assert(pumps>20 && socketConnected);
-    // Keep a newer live state if an older HTTP snapshot (or timeout) follows it.
+    // Commands queue behind a slow read, ahead of any new background work.
+    httpCode=200;httpBody=R"({"state":"old"})";
     EntityState state;state.id="climate.ac";state.available=true;
-    httpBody=R"({"state":"old"})";
-    onPump=[&]{state.state="new";++state.revision;};lastPump=millis();
-    assert(haFetchState(state) && state.state=="new");
-    httpCode=-11;lastPump=millis();
-    assert(haFetchState(state) && state.state=="new" && state.available);
-    onPump=nullptr;httpCode=200;lastPump=millis();
-    assert(haFetchState(state) && state.state=="old");
-    // Queue rejection is reported, with the last successful connection intact.
-    sendAllowed=false;
-    assert(!callService("climate","set_temperature","climate.ac"));
-    assert(g_linkStats.lastCommandStatus==0 && g_linkStats.commandFailures==3);
-    assert(socketConnected && g_haOnline && !g_httpWaiting);
-    assert(powerWork==0 && requestedRefreshes==1);
-    std::puts("PASS: stalled HTTP keeps WebSocket pumping; command success/errors/timeouts, callbacks, entity list, queue/resource failures, reentrancy and link state");
+    completed=false;assert(haFetchState(state,completion));tick();
+    assert(!haFetchState(state,completion));
+    assert(haCallService("switch","toggle","switch.a","",nullptr));
+    assert(!haCallService("switch","toggle","switch.a","",nullptr));
+    state.state="new";++state.revision;
+    drain();assert(state.state=="new" && completed && result);
+    // A newer WebSocket update also wins over a failed read.
+    httpCode=-11;completed=false;assert(haFetchState(state,completion));
+    state.state="live";++state.revision;drain();
+    assert(result && state.state=="live" && state.available);
+    httpCode=200;assert(haFetchState(state,completion));drain();assert(state.state=="old");
+    // Request values are owned snapshots, not borrowed caller/config Strings.
+    std::vector<String> requests;
+    for(unsigned i=0;i<HTTP_WORK_LIMIT;++i){
+        String id="switch."+String(i);
+        assert(haCallService("switch","toggle",id,"",[&,id](bool ok){assert(ok);requests.push_back(id);}));
+    }
+    assert(!haCallService("switch","toggle","switch.overflow"));
+    drain();assert(requests.size()==HTTP_WORK_LIMIT);
+    for(unsigned i=0;i<HTTP_WORK_LIMIT;++i)assert(requests[i]=="switch."+String(i));
+    {
+        String domain="switch",service="toggle",id="switch.snapshot";
+        assert(haCallService(domain,service,id));
+        domain=service=id="changed";
+        g_config.haUrl="http://changed";g_config.haToken="changed";
+    }
+    drain();
+    assert(observed.back().url=="http://fake/api/services/switch/toggle");
+    assert(observed.back().authorization=="Bearer fake-token");
+    assert(observed.back().body==R"({"entity_id":"switch.snapshot"})");
+    g_config.haUrl="http://fake";g_config.haToken="fake-token";
+    // Completion can safely enqueue new work after its request slot is released.
+    bool nested=false;
+    assert(haCallService("switch","toggle","switch.a","",[&](bool ok){
+        assert(ok);nested=haCallService("switch","toggle","switch.a");
+    }));drain();assert(nested);
+    // Filtered entity options are delivered after returning to the caller.
+    httpBody=R"([{"entity_id":"climate.ac","attributes":{"friendly_name":"A & B"}}])";
+    String options;assert(haFetchEntityOptions([&](bool ok,const String& value){assert(ok);options=value;},1));
+    assert(options.isEmpty());drain();
+    assert(options=="<option value=\"climate.ac\">A &amp; B</option>");
+    // Suspend cancels queued commands, drains an active read without applying
+    // its result, and rejects new work. Waking cannot revive an old response.
+    state.state="kept";completed=false;
+    httpBody=R"({"state":"stale"})";
+    assert(haFetchState(state,completion));tick();
+    bool cancelled=false;
+    assert(haCallService("switch","toggle","switch.cancel","",[&](bool ok){assert(!ok);cancelled=true;}));
+    delay(2);size_t sentBefore=observed.size();
+    haSetDataSuspended(true);
+    assert(cancelled && !g_wsAuthed && !g_stateSubscribed && powerWork==0);
+    assert(!haFetchState(state,completion) && !haCallService("switch","toggle","switch.a"));
+    assert(!haFetchEntityOptions(nullptr));
+    haSetDataSuspended(false);drain();
+    assert(completed && !result && state.state=="kept" && observed.size()==sentBefore);
+    assert(g_discardedHttp==2);
+    // Late options cannot repopulate a paused selector.
+    bool optionsCancelled=false;
+    assert(haFetchEntityOptions([&](bool ok,const String&){assert(!ok);optionsCancelled=true;}));tick();
+    haSetDataSuspended(true);drain();assert(optionsCancelled);
+    haSetDataSuspended(false);
+    // A dispatched request whose task has not started yet is cancellable too.
+    workerAllowed.store(false);completed=false;
+    auto requestCount=observed.size();
+    assert(haCallService("switch","toggle","switch.notstarted","",completion));tick();
+    haSetDataSuspended(true);workerAllowed.store(true);drain();
+    assert(completed && !result && observed.size()==requestCount);
+    haSetDataSuspended(false);
+    // Dispatch failure completes once and releases the work/power guard.
+    sendAllowed=false;completed=false;
+    assert(haCallService("switch","toggle","switch.a","",completion));
+    drain();assert(completed && !result && g_linkStats.lastCommandStatus==0);
+    assert(g_linkStats.commandFailures==3 && socketConnected && g_haOnline);
+    assert(powerWork==0 && !haHttpBusy() && g_dirty[0]==false);
+    std::puts("PASS: nonblocking reads/commands/options, navigation during slow HTTP, revision races, bounded FIFO, duplicate rejection, callback enqueue, errors and resource cleanup");
     std::fflush(stdout);
-    // The firmware worker is intentionally permanent; end without tearing down its queue.
     std::_Exit(0);
 }
 '''
+
 with tempfile.TemporaryDirectory(prefix='m5-http-worker-') as directory:
     tmp = Path(directory)
     (tmp / 'Arduino.h').write_text(arduino)

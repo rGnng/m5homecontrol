@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <time.h>
+#include <functional>
 
 enum class EntityType : uint8_t {
     Unknown,
@@ -72,6 +73,9 @@ String displayText(const String& text);
 
 void haBegin();
 void haLoop();
+void haSetDataSuspended(bool suspended);
+bool haDataSuspended();
+uint32_t haDataGeneration();
 bool haWsConnected();
 bool haStateUpdatesReady();
 bool haClockReady();
@@ -85,7 +89,15 @@ void haSetStatusCallback(HaStatusCallback cb);
 void haSetAuthCallback(HaAuthCallback cb);
 void haSetCommandCallback(HaCommandCallback cb);
 
-bool haFetchState(EntityState& entity);
-bool haFetchEntityOptions(String& optionsHtml, int maxOptions = 300);
+// Async APIs return whether work was accepted, not the HTTP result. Completion
+// callbacks run on the main thread. Suspension cancels accepted work with false;
+// rejected work has no callback.
+using HaResultCallback = std::function<void(bool)>;
+using HaOptionsCallback = std::function<void(bool, const String&)>;
+bool haHttpBusy();
+// The destination entity must remain alive until completion.
+bool haFetchState(EntityState& entity, HaResultCallback complete);
+bool haFetchEntityOptions(HaOptionsCallback complete, int maxOptions = 300);
 bool haCallService(const String& domain, const String& service,
-                   const String& entityId, const String& extraJson = "");
+                   const String& entityId, const String& extraJson = "",
+                   HaResultCallback complete = nullptr);

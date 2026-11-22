@@ -6,8 +6,7 @@
 static bool g_connectedIdle = false;
 static unsigned g_powerWork = 0;
 static uint32_t g_activeCpuMhz = 0;
-static wifi_ps_type_t g_savedWifiSleep = WIFI_PS_NONE;
-static bool g_restoreWifiSleep = false;
+static bool g_connectedSuspended = false;
 
 static void applyConnectedCpu() {
     if (!g_activeCpuMhz) {
@@ -23,29 +22,37 @@ static void applyConnectedCpu() {
     }
 }
 
+static void applyConnectedWifi() {
+    wifi_ps_type_t current;
+    wifi_ps_type_t target = g_powerWork ? WIFI_PS_NONE :
+        g_connectedSuspended ? WIFI_PS_MAX_MODEM : WIFI_PS_MIN_MODEM;
+    if (esp_wifi_get_ps(&current) == ESP_OK && current != target) esp_wifi_set_ps(target);
+}
+
 void setConnectedPowerIdle(bool idle) {
     g_connectedIdle = idle;
     applyConnectedCpu();
+    applyConnectedWifi();
 }
 
 bool connectedPowerIdle() { return g_connectedIdle; }
 
+void setConnectedPowerSuspended(bool suspended) {
+    g_connectedSuspended = suspended;
+    applyConnectedWifi();
+}
+
 void beginConnectedPowerWork() {
     ++g_powerWork;
     applyConnectedCpu();
-    if (g_powerWork == 1) {
-        g_restoreWifiSleep = esp_wifi_get_ps(&g_savedWifiSleep) == ESP_OK &&
-            g_savedWifiSleep != WIFI_PS_NONE && esp_wifi_set_ps(WIFI_PS_NONE) == ESP_OK;
-    }
+    applyConnectedWifi();
 }
 
 void endConnectedPowerWork() {
     if (g_powerWork) --g_powerWork;
-    if (!g_powerWork && g_restoreWifiSleep) {
-        esp_wifi_set_ps(g_savedWifiSleep);
-        g_restoreWifiSleep = false;
-    }
     applyConnectedCpu();
+    // Restore the current policy, even if the display changed during a request.
+    applyConnectedWifi();
 }
 
 String connectedPowerStatus() {
