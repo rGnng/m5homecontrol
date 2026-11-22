@@ -259,12 +259,11 @@ static String htmlHeader(const String& title) {
     h += ".col{min-width:0}";
     h += "fieldset{min-width:0;border:1px solid #333;margin:0 0 18px;padding:12px 14px;background:#080808}";
     h += "legend{font-weight:600;padding:0 4px;color:#fff}label{display:block;margin:10px 0 4px;font-size:14px;color:#bbb}";
-    h += "input,select{width:100%;box-sizing:border-box;padding:8px;border:1px solid #444;border-radius:0;font:inherit;background:#111;color:#eee}";
+    h += "button,.button-link,input,select{box-sizing:border-box;height:36px;font:inherit;font-size:14px;font-weight:400;line-height:20px}";
+    h += "input,select{width:100%;padding:7px 8px;border:1px solid #444;border-radius:0;background:#111;color:#eee}";
     h += "input:focus,select:focus{outline:none;border-color:#aaa}";
-    h += "button{margin-top:16px;padding:10px 18px;border:1px solid #666;border-radius:0;background:#111;color:#eee;font:inherit}";
+    h += "button,.button-link{display:inline-flex;align-items:center;justify-content:center;margin:0;padding:7px 12px;border:1px solid #666;border-radius:0;background:#111;color:#eee;text-decoration:none;white-space:nowrap;cursor:pointer}";
     h += "button[type=submit]{background:#eee;color:#000;border-color:#eee}";
-    h += "button.remove{margin:0;padding:6px 9px;background:#111;color:#ddd;border:1px solid #555}";
-    h += "button.secondary{background:#111;color:#eee;border:1px solid #666;margin:0}";
     h += ".power-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px}";
     h += ".battery-icon{display:block;width:60px;height:auto;color:#ddd}";
     h += ".connection-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0}";
@@ -277,6 +276,7 @@ static String htmlHeader(const String& title) {
     h += ".modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:20}";
     h += ".modal.open{display:block}";
     h += ".modal-body{background:#0a0a0a;color:#ddd;max-width:640px;max-height:80vh;overflow:auto;margin:10vh auto;padding:18px;border:1px solid #444}";
+    h += ".modal-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 12px}";
     h += "table{width:100%;border-collapse:collapse}td{padding:4px 0;vertical-align:top}";
     h += "td.n{width:28px;color:#777;padding-top:12px}code{background:#1a1a1a;color:#eee;padding:1px 4px}";
     h += "th{text-align:left;font-size:12px;color:#888;font-weight:600;padding:4px 0}";
@@ -286,28 +286,26 @@ static String htmlHeader(const String& title) {
     h += ".schedule-line{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:8px}";
     h += ".schedule-times{grid-template-columns:repeat(2,minmax(0,1fr))}";
     h += ".schedule-line label{min-width:0;margin:0;font-size:12px;display:flex;flex-direction:column;justify-content:flex-end}";
-    h += ".schedule-line input{min-width:0;margin-top:5px;padding:8px 5px;font-size:14px}";
+    h += ".schedule-line input{min-width:0;margin-top:5px;padding:7px 5px}";
     h += "label.inline{display:inline-flex;align-items:center;gap:4px;margin:0 10px 0 0;font-size:12px;color:#aaa}";
-    h += "label.inline input{width:auto;margin:0}";
+    h += "label.inline input{width:auto;height:auto;margin:0}";
     h += ".pagehead{font-weight:600;margin:18px 0 6px;color:#fff}";
     h += ".pagebar{display:flex;align-items:center;gap:6px;margin:18px 0 6px}";
     h += ".page-number{min-width:2ch;text-align:right;color:#888;font-size:14px}";
     h += ".pagebar .ptitle{flex:1;min-width:0;width:0}";
-    h += ".pagebar button{margin:0;flex-shrink:0;padding:8px 10px}";
+    h += ".pagebar button{flex-shrink:0}";
     h += "button:disabled{opacity:.35;cursor:default}";
-    h += ".actions{display:flex;align-items:center;gap:12px;margin:8px 0 24px}";
-    h += ".actions button{width:auto;padding:7px 14px;margin:0}";
+    h += ".actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0 0}";
     h += ".display-preview button[aria-pressed=true]{background:#eee;color:#000;border-color:#eee}";
     h += ".display-preview button[data-error=true]{border-color:#d77}";
-    h += ".actions.top{justify-content:space-between;gap:8px;margin:0 0 16px}";
+    h += ".actions.top{flex-wrap:nowrap;justify-content:space-between;margin:0 0 16px}";
     h += ".actions.top h1{margin:0;white-space:nowrap}.actions.top button{flex-shrink:0;white-space:nowrap}";
-    h += ".button-link{display:flex;align-items:center;justify-content:center;box-sizing:border-box;padding:7px 14px;border:1px solid #666;background:#111;color:#eee;text-decoration:none}";
-    h += ".footer-actions{justify-content:flex-end;gap:8px;margin:16px 0 0}.footer-actions button{font-size:14px}";
+    h += ".footer-actions{justify-content:flex-end;margin:16px 0 0}";
     h += ".device-info{margin:12px 0 0}";
-    h += ".device-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0}.device-actions .button-link{min-width:0;padding:7px 10px;font-size:14px;text-align:center}";
+    h += ".device-actions{margin:0}";
     h += ".save-status{color:#bbb;font-size:14px;margin:0 0 16px}.save-status:empty{display:none}";
     h += "@media(max-width:800px){.layout{grid-template-columns:1fr}}";
-    h += "@media(max-width:400px){.actions.top h1{font-size:20px}.actions.top button{font-size:14px;padding:7px 10px}.device-actions .button-link{font-size:12px;padding:7px 6px}}";
+    h += "@media(max-width:400px){.actions.top h1{font-size:20px}}";
     h += "</style></head><body>";
     return h;
 }
@@ -548,14 +546,14 @@ static void handleRoot() {
         page += "</tbody></table></div>";
     }
     page += "</div>";
-    page += "<button type=\"button\" id=\"add-page\" onclick=\"addPage()\">Add page</button>";
+    page += "<div class=\"actions\"><button type=\"button\" id=\"add-page\" onclick=\"addPage()\">Add page</button></div>";
     page += "</fieldset>";
     page += "</div>";
     page += "</div>";
 
     page += "<div class=\"modal\" id=\"connection-modal\">";
     page += "<div class=\"modal-body\">";
-    page += "<div class=\"pagehead\"><span>Connection</span> "
+    page += "<div class=\"pagehead modal-heading\"><span>Connection</span> "
             "<button type=\"button\" class=\"remove\" onclick=\"closeConnection()\">Close</button></div>";
     page += "<label>Hostname (.local)</label><input name=\"host\" autocomplete=\"off\" value=\"" +
             htmlEscape(g_config.hostname) + "\" placeholder=\"ha-remote\">";
@@ -570,7 +568,7 @@ static void handleRoot() {
     page += g_config.haToken.isEmpty() ? "not configured" : "configured";
     page += "\">";
     page += "<p>The token is stored in NVS and never shown again.</p>";
-    page += "<button type=\"submit\">Save and reboot</button>";
+    page += "<div class=\"actions\"><button type=\"submit\">Save and reboot</button></div>";
     page += "</div></div>";
 
     page += R"JS(
@@ -939,7 +937,7 @@ The device restarts after a successful update.</p>
 <form id="update-form" method="post" action="/update" enctype="multipart/form-data">
 <label for="firmware">Firmware (.bin)</label>
 <input id="firmware" type="file" name="firmware" accept=".bin" required>
-<button id="upload" type="submit">Upload and restart</button>
+<div class="actions"><button id="upload" type="submit">Upload and restart</button></div>
 </form>
 <p id="update-status" role="status" aria-live="polite"></p>
 <p><a href="/">Back to configuration</a></p>
