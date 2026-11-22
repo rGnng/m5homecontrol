@@ -291,7 +291,7 @@ static String htmlHeader(const String& title) {
     h += "label.inline input{width:auto;height:auto;margin:0}";
     h += ".pagehead{font-weight:600;margin:18px 0 6px;color:#fff}";
     h += ".pagebar{display:flex;align-items:center;gap:6px;margin:18px 0 6px}";
-    h += ".page-number{min-width:2ch;text-align:right;color:#888;font-size:14px}";
+    h += ".page-number{display:flex;align-items:center;justify-content:center;flex:0 0 36px;box-sizing:border-box;height:36px;border:1px solid #444;background:#111;color:#bbb;font-size:14px;line-height:20px;text-align:center}";
     h += ".pagebar .ptitle{flex:1;min-width:0;width:0}";
     h += ".pagebar button{flex-shrink:0}";
     h += "button:disabled{opacity:.35;cursor:default}";
