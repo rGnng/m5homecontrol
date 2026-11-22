@@ -278,7 +278,8 @@ static String htmlHeader(const String& title) {
     h += ".modal-body{background:#0a0a0a;color:#ddd;max-width:640px;max-height:80vh;overflow:auto;margin:10vh auto;padding:18px;border:1px solid #444}";
     h += ".modal-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 12px}";
     h += "table{width:100%;border-collapse:collapse}td{padding:4px 0;vertical-align:top}";
-    h += "td.n{width:28px;color:#777;padding-top:12px}code{background:#1a1a1a;color:#eee;padding:1px 4px}";
+    h += ".pageblock table{table-layout:fixed}.pageblock th:first-child{width:calc(var(--number-width) + var(--page-gap))}";
+    h += "td.n{color:#777;padding-top:12px}code{background:#1a1a1a;color:#eee;padding:1px 4px}";
     h += "th{text-align:left;font-size:12px;color:#888;font-weight:600;padding:4px 0}";
     h += ".modesrow td{padding:0 0 10px}.modelabel{font-size:12px;color:#888;margin-right:8px}";
     h += ".auxfields{display:grid;grid-template-columns:1fr 1fr;gap:8px}";
@@ -290,8 +291,9 @@ static String htmlHeader(const String& title) {
     h += "label.inline{display:inline-flex;align-items:center;gap:4px;margin:0 10px 0 0;font-size:12px;color:#aaa}";
     h += "label.inline input{width:auto;height:auto;margin:0}";
     h += ".pagehead{font-weight:600;margin:18px 0 6px;color:#fff}";
-    h += ".pagebar{display:flex;align-items:center;gap:6px;margin:18px 0 6px}";
-    h += ".page-number{display:flex;align-items:center;justify-content:center;flex:0 0 36px;box-sizing:border-box;height:36px;border:1px solid #444;background:#111;color:#bbb;font-size:14px;line-height:20px;text-align:center}";
+    h += ".pageblock{--number-width:36px;--page-gap:6px}";
+    h += ".pagebar{display:flex;align-items:center;gap:var(--page-gap);margin:18px 0 6px}";
+    h += ".page-number{display:flex;align-items:center;justify-content:center;flex:0 0 var(--number-width);box-sizing:border-box;height:36px;border:1px solid #444;background:#111;color:#bbb;font-size:14px;line-height:20px;text-align:center}";
     h += ".pagebar .ptitle{flex:1;min-width:0;width:0}";
     h += ".pagebar button{flex-shrink:0}";
     h += "button:disabled{opacity:.35;cursor:default}";
