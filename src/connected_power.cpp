@@ -24,8 +24,8 @@ static void applyConnectedCpu() {
 
 static void applyConnectedWifi() {
     wifi_ps_type_t current;
-    wifi_ps_type_t target = g_powerWork ? WIFI_PS_NONE :
-        g_connectedSuspended ? WIFI_PS_MAX_MODEM : WIFI_PS_MIN_MODEM;
+    wifi_ps_type_t target = g_connectedSuspended && !g_powerWork
+        ? WIFI_PS_MAX_MODEM : WIFI_PS_NONE;
     if (esp_wifi_get_ps(&current) == ESP_OK && current != target) esp_wifi_set_ps(target);
 }
 
@@ -58,8 +58,11 @@ void endConnectedPowerWork() {
 String connectedPowerStatus() {
     wifi_ps_type_t mode = WIFI_PS_NONE;
     bool known = esp_wifi_get_ps(&mode) == ESP_OK;
+    int8_t txPower = 0;
+    bool txKnown = esp_wifi_get_max_tx_power(&txPower) == ESP_OK;
     return "power_idle=" + String(g_connectedIdle ? 1 : 0) +
            " cpu_mhz=" + String(getCpuFrequencyMhz()) +
            " wifi_sleep=" + String(!known ? "unavailable" : mode == WIFI_PS_MIN_MODEM
-                                      ? "minimum" : mode == WIFI_PS_MAX_MODEM ? "maximum" : "none");
+                                      ? "minimum" : mode == WIFI_PS_MAX_MODEM ? "maximum" : "none") +
+           " wifi_tx_power_qdbm=" + String(txKnown ? txPower : -1);
 }

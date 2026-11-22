@@ -40,6 +40,7 @@ inline wifi_ps_type_t ps=WIFI_PS_MIN_MODEM;
 inline int psError=0;
 inline int esp_wifi_get_ps(wifi_ps_type_t* value){*value=ps;return psError;}
 inline int esp_wifi_set_ps(wifi_ps_type_t value){if(psError)return psError;ps=value;return ESP_OK;}
+inline int esp_wifi_get_max_tx_power(int8_t* value){*value=80;return psError;}
 '''
 cpu_test = r'''
 #include "connected_power.h"
@@ -48,14 +49,15 @@ cpu_test = r'''
 #include <cassert>
 int main(){
     setConnectedPowerIdle(false);assert(cpu==160 && frequencies==std::vector<uint32_t>({160}));
-    setConnectedPowerIdle(true);assert(cpu==80 && connectedPowerIdle());
+    assert(ps==WIFI_PS_NONE);
+    setConnectedPowerIdle(true);assert(cpu==80 && connectedPowerIdle() && ps==WIFI_PS_NONE);
     {
         ConnectedPowerWork outer;assert(cpu==160 && ps==WIFI_PS_NONE);
         {ConnectedPowerWork inner;assert(cpu==160 && ps==WIFI_PS_NONE);}
         assert(cpu==160 && ps==WIFI_PS_NONE);
         setConnectedPowerIdle(true);assert(cpu==160);
     }
-    assert(cpu==80 && ps==WIFI_PS_MIN_MODEM);
+    assert(cpu==80 && ps==WIFI_PS_NONE);
     endConnectedPowerWork();assert(cpu==80);
     setConnectedPowerIdle(false);assert(cpu==160);
     // Policy changes during a transfer must restore the latest mode.
@@ -63,15 +65,18 @@ int main(){
     setConnectedPowerSuspended(true);assert(ps==WIFI_PS_NONE);
     endConnectedPowerWork();assert(ps==WIFI_PS_MAX_MODEM);
     beginConnectedPowerWork();setConnectedPowerSuspended(false);
-    endConnectedPowerWork();assert(ps==WIFI_PS_MIN_MODEM);
+    endConnectedPowerWork();assert(ps==WIFI_PS_NONE);
     setConnectedPowerSuspended(true);assert(ps==WIFI_PS_MAX_MODEM);
     {ConnectedPowerWork transfer;assert(ps==WIFI_PS_NONE);}
     assert(ps==WIFI_PS_MAX_MODEM);
-    setConnectedPowerSuspended(false);assert(ps==WIFI_PS_MIN_MODEM);
+    setConnectedPowerSuspended(false);assert(ps==WIFI_PS_NONE);
     cpuAllowed=false;setConnectedPowerIdle(true);assert(cpu==160);
     cpuAllowed=true;setConnectedPowerIdle(true);assert(cpu==80);
-    assert(connectedPowerStatus().find("cpu_mhz=80 wifi_sleep=minimum")!=String::npos);
-    ps=WIFI_PS_NONE;assert(connectedPowerStatus().find("wifi_sleep=none")!=String::npos);
+    assert(connectedPowerStatus().find("cpu_mhz=80 wifi_sleep=none")!=String::npos);
+    assert(connectedPowerStatus().find("wifi_tx_power_qdbm=80")!=String::npos);
+    setConnectedPowerIdle(false);setConnectedPowerSuspended(true);
+    assert(ps==WIFI_PS_MAX_MODEM);
+    setConnectedPowerSuspended(false);assert(ps==WIFI_PS_NONE);
     psError=1;assert(connectedPowerStatus().find("wifi_sleep=unavailable")!=String::npos);
     std::puts("PASS: actual CPU idle/boost, nested work guards, failed frequency changes and Wi-Fi diagnostics");
 }

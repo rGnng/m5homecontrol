@@ -8,6 +8,7 @@
 #include <Update.h>
 #include <esp_system.h>
 #include <esp_wifi.h>
+#include <esp_netif.h>
 
 #include "ha_client.h"
 #include "connected_power.h"
@@ -17,6 +18,8 @@
 static const char* NVS_NAMESPACE = "haremote";
 static const char* DEFAULT_HA_URL = "";
 static const char* DEFAULT_HOSTNAME = "ha-remote";
+// Arduino-ESP32 2.x stores the name in a 32-byte buffer, including its terminator.
+static constexpr size_t HOSTNAME_MAX_LENGTH = 31;
 
 AppConfig g_config;
 
@@ -25,6 +28,7 @@ static bool g_apMode = false;
 static bool g_routesReady = false;
 static bool g_serverStarted = false;
 static bool g_staEverConnected = false;
+static bool g_wifiWasConnected = false;
 static bool g_mdnsStarted = false;
 static uint32_t g_connectStart = 0;
 static uint32_t g_lastReconnect = 0;
@@ -34,8 +38,8 @@ static String sanitizeHostname(const String& value) {
     in.trim();
     if (in.endsWith(".local")) in = in.substring(0, in.length() - 6);
     String out;
-    out.reserve(32);
-    for (size_t i = 0; i < in.length() && out.length() < 32; i++) {
+    out.reserve(HOSTNAME_MAX_LENGTH);
+    for (size_t i = 0; i < in.length() && out.length() < HOSTNAME_MAX_LENGTH; i++) {
         char c = (char)tolower((unsigned char)in[i]);
         if (isalnum((unsigned char)c)) {
             out += c;
@@ -563,7 +567,7 @@ static void handleRoot() {
     page += "<div class=\"modal-body\">";
     page += "<div class=\"pagehead modal-heading\"><span>Connection</span> "
             "<button type=\"button\" class=\"remove\" onclick=\"closeConnection()\">Close</button></div>";
-    page += "<label>Hostname (.local)</label><input name=\"host\" autocomplete=\"off\" value=\"" +
+    page += "<label>Hostname (DHCP and .local)</label><input name=\"host\" maxlength=\"31\" autocomplete=\"off\" value=\"" +
             htmlEscape(g_config.hostname) + "\" placeholder=\"ha-remote\">";
     page += "<label>Wi-Fi SSID</label><input name=\"ssid\" autocomplete=\"off\" value=\"" +
             htmlEscape(g_config.ssid) + "\">";
@@ -1143,6 +1147,8 @@ static void handleScreenshot() {
     }
 }
 
+static String stationHostname();
+
 static void startWebServer() {
     if (!g_routesReady) {
         server.on("/", HTTP_GET, handleRoot);
@@ -1173,9 +1179,12 @@ static void startWebServer() {
         server.on("/diag", HTTP_GET, []() {
             PowerStatus power = readPowerStatus();
             String text = "board=" + String((int)M5.getBoard());
+            text += " configured_hostname=" + g_config.hostname;
+            text += " wifi_hostname=" + stationHostname();
             text += " uptime_ms=" + String(millis());
             text += " reset_reason=" + String(static_cast<int>(esp_reset_reason()));
             wifi_config_t station = {};
+            text += " wifi_rssi_dbm=" + String(WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : -127);
             text += " wifi_listen_interval=" + String(esp_wifi_get_config(WIFI_IF_STA, &station) == ESP_OK
                 ? station.sta.listen_interval : 0);
             text += " free_heap=" + String(ESP.getFreeHeap());
@@ -1233,6 +1242,14 @@ static void startWebServer() {
 // ---------------------------------------------------------------------
 //  Network
 // ---------------------------------------------------------------------
+static String stationHostname() {
+    // WiFi.getHostname() returns Arduino's cache, which can differ from DHCP.
+    esp_netif_t* station = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    const char* name = nullptr;
+    if (station && esp_netif_get_hostname(station, &name) == ESP_OK && name) return String(name);
+    return String("unavailable");
+}
+
 static void startAccessPoint() {
     WiFi.mode(WIFI_AP);
     WiFi.softAP("HA-Remote");
@@ -1241,15 +1258,25 @@ static void startAccessPoint() {
     Serial.printf("[net] AP mode ssid=HA-Remote ip=%s\n", WiFi.softAPIP().toString().c_str());
 }
 
+static void setMaximumWifiTxPower() {
+    // SDK power units are quarter-dBm; PHY/country limits still apply.
+    if (esp_wifi_set_max_tx_power(80) != ESP_OK) {
+        Serial.println("[net] could not set maximum Wi-Fi transmit power");
+    }
+}
+
 void networkBegin() {
     if (g_config.ssid.isEmpty()) {
         startAccessPoint();
         return;
     }
 
-    WiFi.mode(WIFI_STA);
-    WiFi.setSleep(true);  // WIFI_PS_MIN_MODEM: retain association and HA connection.
+    // The Arduino core applies its cached hostname when enabling STA mode.
+    // Setting it afterward leaves DHCP advertising the default esp32-XXXXXX.
     WiFi.setHostname(g_config.hostname.c_str());
+    WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);  // Normal mode: keep the receiver awake.
+    setMaximumWifiTxPower();
     // Configure credentials without associating, then set the listen interval
     // before connection. No-argument begin() preserves it on every retry.
     WiFi.begin(g_config.ssid.c_str(), g_config.pass.c_str(), 0, nullptr, false);
@@ -1273,12 +1300,18 @@ void networkLoop() {
     if (g_apMode) return;
 
     if (WiFi.status() == WL_CONNECTED) {
+        if (!g_wifiWasConnected) {
+            // Reapply after association/country information is available, also
+            // on reconnect, rather than relying only on the startup request.
+            setMaximumWifiTxPower();
+            g_wifiWasConnected = true;
+        }
         if (!g_staEverConnected) {
             g_staEverConnected = true;
             g_connectStart = 0;
-            Serial.printf("[net] station ssid=%s ip=%s rssi=%d\n",
+            Serial.printf("[net] station ssid=%s ip=%s rssi=%d hostname=%s\n",
                           WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
-                          WiFi.RSSI());
+                          WiFi.RSSI(), stationHostname().c_str());
             if (!g_mdnsStarted && MDNS.begin(g_config.hostname.c_str())) {
                 MDNS.addService("http", "tcp", 80);
                 g_mdnsStarted = true;
@@ -1288,6 +1321,7 @@ void networkLoop() {
         return;
     }
 
+    g_wifiWasConnected = false;
     // Never give up. This covers wrong credentials, missing AP, and DHCP
     // failure (associated but no IP). Retry forever every 10 seconds.
     if (millis() - g_lastReconnect > 15000) {

@@ -170,10 +170,14 @@ associated so web configuration, display previews, screenshots and OTA remain
 reachable. The remote does not enter ESP32 deep sleep or light sleep, and does
 not use the inferred dock hint to change its power policy.
 
-- Normal display mode uses minimum Wi-Fi modem sleep. Dim/off use maximum
-  modem sleep with a listen interval of ten AP beacon intervals. Larger HTTP
-  transfers temporarily disable modem sleep, then restore the mode required by
-  the current display state. Web access can have higher latency in dim/off.
+- Normal display mode disables Wi-Fi modem sleep, keeping the receiver awake
+  even when the CPU is idle. Wi-Fi requests the SDK's maximum TX cap (20 dBm),
+  subject to the radio's PHY limits. RX has no independent power-level setting.
+  Dim/off use maximum modem sleep with a listen interval of ten AP beacon
+  intervals; the TX cap stays high to preserve the link. Larger HTTP transfers
+  temporarily disable modem sleep, then restore the current display policy.
+  Web access can have higher latency in dim/off. These radio settings do not
+  change the CPU idle policy.
 - Entering dim/off disconnects the HA WebSocket, stops HA reconnects, heartbeats,
   subscriptions and REST reads, and cancels queued commands and entity-list
   downloads. An HTTP request already running may finish, but its result is
@@ -214,6 +218,8 @@ not use the inferred dock hint to change its power policy.
 
 `/diag` reports `ha_data_suspended`, `ha_data_generation`, `ha_http_discarded`,
 `entity_values_ready`, `aux_values_ready`, `wifi_listen_interval`,
+`wifi_rssi_dbm` (-127 while disconnected), `wifi_tx_power_qdbm` (quarter-dBm;
+80 means 20 dBm, -1 means unavailable),
 `power_idle`, actual `cpu_mhz`, `wifi_sleep`, `lcd_sleep`,
 `audio_quiet`, polling intervals, REST counters, `ws_state_ready`, watched entity
 count, state events, and subscription errors. Power saving on the dock can be
@@ -327,7 +333,8 @@ Fields:
 - Dynamic page blocks: title + eight slots
 - Each slot: entity ID and display name
 - Climate slots only: optional AUX entity/name and allowed MODE values (COOL/HEAT/DRY/FAN/AUTO)
-- Hostname used for `http://<hostname>.local/`, including web firmware updates
+- Hostname used by DHCP and for `http://<hostname>.local/`, including web firmware
+  updates; up to 31 letters, digits, and hyphens
 - Wi-Fi SSID and password
 - Home Assistant base URL
 - Long-lived access token
@@ -547,8 +554,12 @@ pio device monitor -p "<serial-port>" -b 115200
 ```
 
 After the first USB flash, update over Wi-Fi through the web firmware page.
-The configured hostname (`ha-remote` by default) is advertised over mDNS for
-access at `http://<hostname>.local/`.
+The configured hostname (`ha-remote` by default) is applied before Wi-Fi starts,
+so DHCP and mDNS use the same name. mDNS serves `http://<hostname>.local/`;
+router-managed names such as `<hostname>.lan` depend on the router's DHCP/DNS
+configuration. `/diag` reports `configured_hostname` and the actual station
+interface's `wifi_hostname`. A router may retain the previous lease name until
+its lease or DNS cache is refreshed.
 
 ### HTTP firmware updates
 
@@ -613,6 +624,7 @@ g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
 python3 tools/test_ha_clock_ws.py
 python3 tools/test_ha_http_worker.py
 python3 tools/test_web_config.py
+python3 tools/test_network_hostname.py
 python3 tools/test_connected_power.py
 python3 tools/test_idle_io.py
 ```
