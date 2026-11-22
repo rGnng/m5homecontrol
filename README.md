@@ -148,9 +148,11 @@ In the device test, battery handoff continued working and live readings returned
 after undocking. A plug means assumed dock power, not confirmed charging/full;
 `?` means no current battery reading and does not mean empty.
 
-Web -> Display -> **Refresh battery status**, or `GET /power`, reports the
-approximate battery percentage when available. Core Basic's IP5306 does not
-expose battery/VBUS voltage readings.
+Web -> **Power** shows a battery icon; **Refresh** updates its fill level.
+An unavailable reading shows `?`; hovering the icon reveals its status or
+approximate percentage. `GET /power` retains the text reading, while
+`GET /power?format=icon` returns the icon. Core Basic's IP5306 does not expose
+battery/VBUS voltage readings.
 `/diag` uses `charging=unknown` when there is no confirmed charging/full signal;
 an inactive Core charger is not proof that the dock is not charging.
 It also reports `dock_inferred`, `pmic_online`, `core_keep_on`, `core_boost_enabled`,
@@ -316,7 +318,8 @@ working memory. Capturing does not wake the display or change pages.
 | `GET /` | Configuration form |
 | `POST /save` | Save settings and reboot; the web form reconnects automatically |
 | `POST /display` | Preview the display with form field `mode=wake`, `dim`, or `off`; settings are not saved |
-| `GET /power` | Current battery and Core charger readings |
+| `GET /power` | Current approximate battery percentage as text |
+| `GET /power?format=icon` | Battery icon; an unavailable reading shows `?` |
 | `GET /diag` | Menu, backlight, LED, and power diagnostics; reading it does not wake the display |
 | `GET /screenshot.bmp` | Stream the current display as `ha-remote-screen.bmp`; does not redraw or wake the display |
 | `GET /update` | Firmware upload form; requires the firmware username/password |

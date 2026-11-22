@@ -265,6 +265,15 @@ static String htmlHeader(const String& title) {
     h += "button[type=submit]{background:#eee;color:#000;border-color:#eee}";
     h += "button.remove{margin:0;padding:6px 9px;background:#111;color:#ddd;border:1px solid #555}";
     h += "button.secondary{background:#111;color:#eee;border:1px solid #666;margin:0}";
+    h += ".power-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px}";
+    h += ".battery-icon{display:block;width:60px;height:auto;color:#ddd}";
+    h += ".connection-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0}";
+    h += ".connection-row+.connection-row{border-top:1px solid #222}.connection-info{min-width:0}";
+    h += ".connection-name{display:block;color:#ddd;font-size:14px}.connection-value{display:block;color:#888;font-size:12px;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}";
+    h += ".connection-state{flex-shrink:0;font-size:12px;color:#999}.connection-state:before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;margin-right:6px}";
+    h += ".connection-state.up{color:#92c5a4}.connection-state.down{color:#d99898}";
+    h += ".metadata{display:grid;grid-template-columns:auto minmax(0,1fr);gap:5px 12px;font-size:12px;color:#888}.metadata dd{margin:0;color:#bbb;overflow-wrap:anywhere}";
+    h += ".connection-clock{margin:8px 0 0;padding-top:10px;border-top:1px solid #222}";
     h += ".modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:20}";
     h += ".modal.open{display:block}";
     h += ".modal-body{background:#0a0a0a;color:#ddd;max-width:640px;max-height:80vh;overflow:auto;margin:10vh auto;padding:18px;border:1px solid #444}";
@@ -286,13 +295,19 @@ static String htmlHeader(const String& title) {
     h += ".pagebar .ptitle{flex:1;min-width:0;width:0}";
     h += ".pagebar button{margin:0;flex-shrink:0;padding:8px 10px}";
     h += "button:disabled{opacity:.35;cursor:default}";
-    h += ".status{border-left:3px solid #eee;padding:8px 10px;background:#111;margin:0 0 14px;color:#bbb}";
     h += ".actions{display:flex;align-items:center;gap:12px;margin:8px 0 24px}";
     h += ".actions button{width:auto;padding:7px 14px;margin:0}";
-    h += ".actions.top{justify-content:flex-end;margin:0 0 16px}";
-    h += ".actions.bottom{justify-content:flex-end}";
-    h += ".save-status{min-height:18px;color:#bbb;font-size:14px;flex:1;margin:0}";
+    h += ".display-preview button[aria-pressed=true]{background:#eee;color:#000;border-color:#eee}";
+    h += ".display-preview button[data-error=true]{border-color:#d77}";
+    h += ".actions.top{justify-content:space-between;gap:8px;margin:0 0 16px}";
+    h += ".actions.top h1{margin:0;white-space:nowrap}.actions.top button{flex-shrink:0;white-space:nowrap}";
+    h += ".button-link{display:flex;align-items:center;justify-content:center;box-sizing:border-box;padding:7px 14px;border:1px solid #666;background:#111;color:#eee;text-decoration:none}";
+    h += ".footer-actions{justify-content:flex-end;gap:8px;margin:16px 0 0}.footer-actions button{font-size:14px}";
+    h += ".device-info{margin:12px 0 0}";
+    h += ".device-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0}.device-actions .button-link{min-width:0;padding:7px 10px;font-size:14px;text-align:center}";
+    h += ".save-status{color:#bbb;font-size:14px;margin:0 0 16px}.save-status:empty{display:none}";
     h += "@media(max-width:800px){.layout{grid-template-columns:1fr}}";
+    h += "@media(max-width:400px){.actions.top h1{font-size:20px}.actions.top button{font-size:14px;padding:7px 10px}.device-actions .button-link{font-size:12px;padding:7px 6px}}";
     h += "</style></head><body>";
     return h;
 }
@@ -314,6 +329,27 @@ static String powerSummary() {
     text += power.batteryPercent < 0 ? String("Unavailable")
                                     : String(power.batteryPercent) + "% (approximate)";
     return text;
+}
+
+static String powerIcon() {
+    PowerStatus power = readPowerStatus(true);
+    int percent = power.batteryPercent;
+    bool known = percent >= 0 && percent <= 100;
+    String label = known ? "Battery: " + String(percent) + "% (approximate)"
+                         : String("Battery status unavailable");
+    String svg = "<svg class=\"battery-icon\" role=\"img\" aria-label=\"" + label +
+                 "\" viewBox=\"0 0 46 24\" xmlns=\"http://www.w3.org/2000/svg\"><title>" + label + "</title>";
+    svg += "<rect x=\"1\" y=\"2\" width=\"38\" height=\"20\" rx=\"1\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"/>"
+           "<rect x=\"38\" y=\"8\" width=\"6\" height=\"8\" fill=\"currentColor\"/>";
+    if (known) {
+        int width = (percent * 32 + 50) / 100;
+        if (percent > 0 && width == 0) width = 1;
+        svg += "<rect class=\"battery-level\" x=\"4\" y=\"5\" width=\"" + String(width) +
+               "\" height=\"14\" fill=\"currentColor\"/>";
+    } else {
+        svg += "<text x=\"20\" y=\"18\" text-anchor=\"middle\" font-size=\"18\" fill=\"currentColor\">?</text>";
+    }
+    return svg + "</svg>";
 }
 
 static void handleRoot() {
@@ -338,47 +374,52 @@ static void handleRoot() {
     HtmlStream<WebServer> page(server, haLoop);
     page += htmlHeader("HA Remote Setup");
 
-    String wifiLabel = g_config.ssid.isEmpty()
-                           ? String("not configured")
-                           : (WiFi.status() == WL_CONNECTED
-                                  ? htmlEscape(WiFi.SSID())
-                                  : String("disconnected"));
+    bool wifiConnected = !g_apMode && WiFi.status() == WL_CONNECTED;
+    String wifiLabel = g_apMode ? String("HA-Remote")
+                               : htmlEscape(wifiConnected ? WiFi.SSID() : g_config.ssid);
     String haLabel;
-    String haColor;
+    String haState;
     if (g_config.haToken.isEmpty()) {
-        haLabel = "not configured";
-        haColor = "#777";
-    } else if (haWsConnected()) {
-        haLabel = "connected";
-        haColor = "#087f23";
+        haLabel = "Not configured";
+        haState = "idle";
+    } else if (wifiConnected && haWsConnected()) {
+        haLabel = "Connected";
+        haState = "up";
     } else {
-        haLabel = "disconnected";
-        haColor = "#b00020";
+        haLabel = "Disconnected";
+        haState = "down";
     }
 
-    page += "<h1>HA Remote</h1>";
     page += "<form method=\"post\" action=\"/save\">";
-    page += "<div class=\"actions top\"><div id=\"save-status\" class=\"save-status\"></div>"
+    page += "<div class=\"actions top\"><h1>HA Remote</h1>"
             "<button type=\"submit\">Save and reboot</button></div>";
+    page += "<div id=\"save-status\" class=\"save-status\" role=\"status\"></div>";
     page += "<div class=\"layout\">";
     page += "<div class=\"col left\">";
 
-    page += "<fieldset><legend>Config</legend>";
-    page += "<div class=\"status\">";
-    page += g_apMode ? "Mode: access point" : "Mode: station";
-    page += "<br>Address: http://" + htmlEscape(networkIp());
-    page += "<br>Wi-Fi: " + wifiLabel;
-    page += "<br>Host: " + htmlEscape(g_config.hostname) + ".local";
-    page += "<br>Home Assistant: <b style=\"color:" + haColor + "\">" + haLabel + "</b>";
-    page += "<br>HA URL: " + htmlEscape(g_config.haUrl);
-    page += "</div>";
-    page += "<button type=\"button\" class=\"secondary\" onclick=\"openConnection()\">Config: Wi-Fi &amp; Home Assistant</button>";
-    page += "</fieldset>";
+    page += "<fieldset><legend>Connection</legend>";
+    auto connectionRow = [&](const char* label, const String& value,
+                             const String& state, const String& stateClass) {
+        page += "<div class=\"connection-row\"><div class=\"connection-info\">";
+        page += "<span class=\"connection-name\">" + String(label) + "</span>";
+        page += "<span class=\"connection-value\" title=\"" + value + "\">" + value + "</span></div>";
+        page += "<span class=\"connection-state " + stateClass + "\">" + state + "</span></div>";
+    };
+    connectionRow("Wi-Fi", wifiLabel, g_apMode ? "Access point" : (wifiConnected ? "Connected" : "Disconnected"),
+                  wifiConnected ? "up" : (g_apMode ? "idle" : "down"));
+    connectionRow("Home Assistant", htmlEscape(g_config.haUrl), haLabel, haState);
+    page += "<dl class=\"metadata connection-clock\"><dt>Time zone</dt><dd>" + htmlEscape(haTimeZone()) +
+            "</dd><dt>Time</dt><dd>" + htmlEscape(haLocalTimeText()) + "</dd></dl>";
+    page += "<div style=\"margin-top:12px\">";
+    page += "<button type=\"button\" class=\"secondary\" onclick=\"openConnection()\">Edit connection</button>";
+    page += "</div></fieldset>";
+
+    page += "<fieldset><legend>Power</legend><div class=\"power-row\">";
+    page += "<span id=\"power-status\" role=\"status\">" + powerIcon() + "</span>";
+    page += "<button type=\"button\" class=\"secondary\" onclick=\"refreshPower()\">Refresh</button>";
+    page += "</div></fieldset>";
 
     page += "<fieldset><legend>Display</legend>";
-    page += "<p id=\"power-status\" role=\"status\" style=\"white-space:pre-line\">" +
-            htmlEscape(powerSummary()) + "</p>";
-    page += "<button type=\"button\" class=\"secondary\" onclick=\"refreshPower()\">Refresh battery status</button>";
     page += "<label>Theme</label><select name=\"theme\">";
     page += "<option value=\"flipper\"" +
             String(g_config.theme == 0 ? " selected" : "") + ">Flipper</option>";
@@ -410,18 +451,23 @@ static void handleRoot() {
     scheduleRow("Night", "n", g_config.nightStart, g_config.nightEnd, g_config.nightBrightness,
                 g_config.nightDimBrightness, g_config.nightDimSeconds, g_config.nightOffSeconds);
     page += "<p>0 = disabled. Without dimming, Off counts from last input.</p>";
-    page += "<p>HA timezone: " + htmlEscape(haTimeZone()) +
-            "<br>HA time: " + htmlEscape(haLocalTimeText()) + "</p>";
     page += "<div class=\"pagehead\">Preview display</div>";
-    page += "<div class=\"actions\"><button type=\"button\" onclick=\"previewDisplay('wake')\">Wake</button>"
-            "<button type=\"button\" onclick=\"previewDisplay('dim')\">Dim</button>"
-            "<button type=\"button\" onclick=\"previewDisplay('off')\">Off</button></div>";
-    page += "<p id=\"display-status\" role=\"status\">Uses saved settings. Input or Wake restores the display.</p>";
+    page += "<div class=\"actions display-preview\" role=\"group\" aria-label=\"Display preview\">"
+            "<button type=\"button\" data-display-mode=\"wake\" aria-pressed=\"false\" onclick=\"previewDisplay('wake')\">Wake</button>"
+            "<button type=\"button\" data-display-mode=\"dim\" aria-pressed=\"false\" onclick=\"previewDisplay('dim')\">Dim</button>"
+            "<button type=\"button\" data-display-mode=\"off\" aria-pressed=\"false\" onclick=\"previewDisplay('off')\">Off</button></div>";
+    page += "</fieldset>";
+
+    page += "<fieldset><legend>Device</legend>";
+    page += "<div class=\"actions device-actions\">"
+            "<a class=\"button-link\" href=\"/update\">Update firmware</a>"
+            "<a class=\"button-link\" href=\"/screenshot.bmp\" download=\"ha-remote-screen.bmp\">Download screenshot</a></div>";
+    page += "<dl class=\"metadata device-info\"><dt>Serial baud</dt><dd>115200</dd></dl>";
     page += "</fieldset>";
 
     page += "</div>";
     page += "<div class=\"col right\">";
-    page += "<fieldset><legend>Entity Grid</legend>";
+    page += "<fieldset><legend>Entity List</legend>";
 
     if (optionsLoaded) {
         page += "<datalist id=\"entity-list\">";
@@ -509,11 +555,8 @@ static void handleRoot() {
 
     page += "<div class=\"modal\" id=\"connection-modal\">";
     page += "<div class=\"modal-body\">";
-    page += "<div class=\"pagehead\"><span>Config: Wi-Fi &amp; Home Assistant</span> "
+    page += "<div class=\"pagehead\"><span>Connection</span> "
             "<button type=\"button\" class=\"remove\" onclick=\"closeConnection()\">Close</button></div>";
-    page += "<div class=\"status\">Wi-Fi: " + wifiLabel +
-            "<br>Home Assistant: <b style=\"color:" + haColor + "\">" + haLabel +
-            "</b><br>HA URL: " + htmlEscape(g_config.haUrl) + "</div>";
     page += "<label>Hostname (.local)</label><input name=\"host\" autocomplete=\"off\" value=\"" +
             htmlEscape(g_config.hostname) + "\" placeholder=\"ha-remote\">";
     page += "<label>Wi-Fi SSID</label><input name=\"ssid\" autocomplete=\"off\" value=\"" +
@@ -636,24 +679,42 @@ function openConnection() {
 async function refreshPower() {
   const status = document.getElementById('power-status');
   try {
-    const response = await fetch('/power', {cache: 'no-store'});
+    const response = await fetch('/power?format=icon', {cache: 'no-store'});
     if (!response.ok) throw new Error('Power status unavailable');
-    status.textContent = await response.text();
+    status.innerHTML = await response.text();
+    status.removeAttribute('title');
   } catch (error) {
-    status.textContent = 'Could not read battery status. Check the connection and retry.';
+    const message = 'Could not refresh battery status. Retry.';
+    status.title = message;
+    const icon = status.querySelector('svg');
+    if (icon) {
+      icon.setAttribute('aria-label', message);
+      const title = icon.querySelector('title');
+      if (title) title.textContent = message;
+    }
   }
 }
 async function previewDisplay(mode) {
-  const status = document.getElementById('display-status');
+  const buttons = [...document.querySelectorAll('.display-preview button')];
+  buttons.forEach(button => {
+    button.disabled = true;
+    button.removeAttribute('data-error');
+    button.removeAttribute('title');
+  });
   try {
     const response = await fetch('/display', {
       method: 'POST', body: new URLSearchParams({mode})
     });
     if (!response.ok) throw new Error('Display control failed');
-    status.textContent = mode === 'wake' ? 'Display awake.' :
-      (mode === 'dim' ? 'Dim preview active.' : 'Display off. Use Wake to turn it on.');
+    buttons.forEach(button => button.setAttribute('aria-pressed', String(button.dataset.displayMode === mode)));
   } catch (error) {
-    status.textContent = 'Could not reach the display. Try again.';
+    const button = buttons.find(button => button.dataset.displayMode === mode);
+    if (button) {
+      button.dataset.error = 'true';
+      button.title = 'Could not apply display preview. Retry.';
+    }
+  } finally {
+    buttons.forEach(button => button.disabled = false);
   }
 }
 async function reconnectAfterSave() {
@@ -709,11 +770,8 @@ document.querySelector('form[action="/save"]').addEventListener('submit', functi
 </script>
 )JS";
 
-    page += "<div class=\"actions bottom\"><button type=\"submit\">Save and reboot</button></div>";
+    page += "<div class=\"actions footer-actions\"><button type=\"submit\">Save and reboot</button></div>";
     page += "</form>";
-    page += "<p><a href=\"/update\">Update firmware</a> &middot; "
-            "<a href=\"/screenshot.bmp\" download=\"ha-remote-screen.bmp\">Download screenshot</a></p>";
-    page += "<p style=\"margin-top:24px;color:#777\">Serial console: send <code>:help</code> at 115200 baud.</p>";
     page += htmlFooter();
 
     page.finish();
@@ -1068,7 +1126,8 @@ static void startWebServer() {
         server.on("/screenshot.bmp", HTTP_GET, handleScreenshot);
         server.on("/power", HTTP_GET, []() {
             server.sendHeader("Cache-Control", "no-store");
-            server.send(200, "text/plain", powerSummary());
+            if (server.arg("format") == "icon") server.send(200, "image/svg+xml", powerIcon());
+            else server.send(200, "text/plain", powerSummary());
         });
         server.on("/display", HTTP_POST, []() {
             if (!setDisplayMode(server.arg("mode"))) {

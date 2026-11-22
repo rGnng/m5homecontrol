@@ -37,6 +37,7 @@ void beginConnectedPowerWork(){}
 void endConnectedPowerWork(){}
 #include "ha_client.h"
 #include "html_stream.h"
+#include "power_status.h"
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
@@ -69,11 +70,23 @@ bool haWsConnected(){return true;}
 String networkIp(){return "192.0.2.1";}
 String haTimeZone(){return "Asia/Shanghai";}
 String haLocalTimeText(){return "2026-11-21T12:00:00";}
-static String powerSummary(){return "Battery: unavailable";}
+static PowerStatus testPower;
+PowerStatus readPowerStatus(bool force){assert(force);return testPower;}
 bool haFetchEntityOptions(String& out,int){out="<option value=\"climate.ac\">AC</option>";return true;}
 '''
 tests = r'''
 int main(){
+    // An unavailable reading must not look like a genuinely empty battery.
+    testPower.batteryPercent=-1;
+    assert(powerIcon().find("Battery status unavailable")!=String::npos);
+    assert(powerIcon().find(">?</text>")!=String::npos);
+    testPower.batteryPercent=0;
+    assert(powerIcon().find("Battery: 0%")!=String::npos);
+    assert(powerIcon().find(">?</text>")==String::npos);
+    testPower.batteryPercent=100;
+    assert(powerIcon().find("Battery: 100%")!=String::npos);
+    assert(powerIcon().find("width=\"32\"")!=String::npos);
+    testPower.batteryPercent=75;
     g_config.ssid="test";g_config.hostname="test-remote";g_config.haUrl="http://ha";g_config.haToken="test";
     for(int p=0;p<MAX_PAGES;++p)g_config.pageTitles[p]="Room & lights";
     for(int i=0;i<MAX_ENTITIES;++i){
@@ -109,7 +122,8 @@ with tempfile.TemporaryDirectory(prefix='m5-web-config-') as directory:
     tmp = Path(directory)
     (tmp / 'Arduino.h').write_text(arduino)
     signatures = ['static String htmlEscape(', 'static String formatTime(',
-                  'static String htmlHeader(', 'static String htmlFooter(', 'static void handleRoot(']
+                  'static String htmlHeader(', 'static String htmlFooter(', 'static String powerIcon(',
+                  'static void handleRoot(']
     (tmp / 'test.cpp').write_text(prefix + ''.join(function(s) for s in signatures) + tests)
     subprocess.run(['g++', '-std=c++17', '-O2', '-Wall', '-Wextra', '-Werror', f'-I{tmp}',
                     f'-I{ROOT/"include"}', str(tmp / 'test.cpp'), '-o', str(tmp / 'test')], check=True)
