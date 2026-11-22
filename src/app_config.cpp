@@ -279,7 +279,7 @@ static String htmlHeader(const String& title) {
     h += ".modal-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 12px}";
     h += "table{width:100%;border-collapse:collapse}td{padding:4px 0;vertical-align:top}";
     h += ".pageblock table{table-layout:fixed}.pageblock th:first-child{width:calc(var(--number-width) + var(--page-gap))}";
-    h += "td.n{color:#777;padding-top:12px}code{background:#1a1a1a;color:#eee;padding:1px 4px}";
+    h += "td.n{color:#777;padding:12px var(--page-gap) 4px 0;text-align:right}code{background:#1a1a1a;color:#eee;padding:1px 4px}";
     h += "th{text-align:left;font-size:12px;color:#888;font-weight:600;padding:4px 0}";
     h += ".modesrow td{padding:0 0 10px}.modelabel{font-size:12px;color:#888;margin-right:8px}";
     h += ".auxfields{display:grid;grid-template-columns:1fr 1fr;gap:8px}";
