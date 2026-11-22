@@ -45,6 +45,8 @@ static HaLinkStats g_linkStats;
 
 static uint64_t clockMillis() { return esp_timer_get_time() / 1000; }
 
+bool haClockReady() { return g_haClock.ready(); }
+
 bool haGetLocalTime(struct tm& timeinfo) {
     return g_haClock.localTime(clockMillis(), timeinfo);
 }

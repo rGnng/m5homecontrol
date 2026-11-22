@@ -181,8 +181,17 @@ dock hint to change its power policy.
 - The speaker task and DAC stop one second after a sound finishes. GPIO25 is
   driven low on Core Basic. This quiets the signal path; the board does not
   provide a separate amplifier shutdown control.
-- Idle keypad polling slows from 20 ms to 100 ms and PMIC sampling from 500 ms
-  to 5 seconds. Explicit battery refresh bypasses the sample cache.
+- Calculator3 key reads use its active-low GPIO35 IRQ after a real key verifies
+  the low/read/high signal cycle. Idle health polling then runs once per second.
+  Active polling remains 20 ms. Unverified, missing or faulty IRQ wiring retains
+  100 ms idle polling; a key found by health polling restores this fallback
+  automatically.
+- Day/night backlight calculations run once per minute. Dim/off timers run at
+  their exact deadlines; button input, web previews and the first HA clock sync
+  apply immediately. The minute interval can delay a day/night boundary by up
+  to 60 seconds.
+- PMIC sampling slows from 500 ms to 5 seconds while idle. Explicit battery
+  refresh bypasses the sample cache.
 - HA sends state updates only for configured primary and AUX entities. Commands
   queue a delayed REST check of matching slots, rather than every page. Full
   reconciliation runs every 30 minutes while subscribed, or every 30 seconds
@@ -193,6 +202,12 @@ dock hint to change its power policy.
 count, state events, and subscription errors. Power saving on the dock can be
 verified through these states, but battery runtime or current savings need an
 off-dock runtime test or a current meter.
+
+`keypad_irq_verified`, `keypad_irq_reads`, `keypad_reads` and `keypad_irq_faults`
+show whether IRQ mode is working. `backlight_clock_checks` counts time-of-day
+calculations; `backlight_checks` also includes idle deadlines and manual input.
+The IRQ pin follows the Calculator3's `G35_INT` net in its
+[manufacturer schematic](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1272/A005-V3-Faces_Calculator3_Sche.pdf).
 
 ## Backlight schedule
 
@@ -555,4 +570,5 @@ python3 tools/test_ha_clock_ws.py
 python3 tools/test_ha_http_worker.py
 python3 tools/test_web_config.py
 python3 tools/test_connected_power.py
+python3 tools/test_idle_io.py
 ```

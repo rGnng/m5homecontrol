@@ -74,6 +74,7 @@ void haBegin();
 void haLoop();
 bool haWsConnected();
 bool haStateUpdatesReady();
+bool haClockReady();
 bool haGetLocalTime(struct tm& timeinfo);
 String haTimeZone();
 String haLocalTimeText();

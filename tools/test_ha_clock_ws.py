@@ -51,7 +51,7 @@ static void notifyStatus(bool online){lastOnline=online;}
 static bool parseState(EntityState&,JsonVariantConst){return true;}
 static void wsSendJson(JsonDocument& doc){std::string out;serializeJson(doc,out);sent.push_back(out);}
 '''
-signatures=['static uint64_t clockMillis(', 'bool haGetLocalTime(', 'String haTimeZone(',
+signatures=['static uint64_t clockMillis(', 'bool haClockReady(', 'bool haGetLocalTime(', 'String haTimeZone(',
             'String haLocalTimeText(', 'String haClockStatus(', 'String haConnectionStatus(', 'static void wsSubscribeClock(',
             'static bool syncClock(', 'static bool stateEntityConfigured(', 'static void wsSubscribe(', 'static void wsHandleText(', 'static void wsEvent(',
             'void haLoop(', 'bool haWsConnected(', 'bool haStateUpdatesReady(']
@@ -66,7 +66,7 @@ static void clockEvent(uint32_t id,int64_t epoch,int offset,const char* zone,boo
     std::string json;serializeJson(event,json);message(json);
 }
 int main(){
-    assert(!g_haClock.ready() && haLocalTimeText()=="Unavailable");
+    assert(!haClockReady() && haLocalTimeText()=="Unavailable");
     wsEvent(WStype_CONNECTED,nullptr,0);
     assert(g_linkStats.connections==1 && g_linkStats.lastConnectMs==1000 && !lastOnline);
     message(R"({"type":"auth_required"})");
@@ -86,6 +86,7 @@ int main(){
     uint32_t subscription=g_wsClockId;
     // Both forms are used by HA versions: a JSON object or JSON encoded text.
     clockEvent(subscription,1767225600,28800,"Asia/Shanghai");
+    assert(haClockReady());
     assert(haTimeZone()=="Asia/Shanghai" && haLocalTimeText()=="2026-01-01T08:00:00");
     nowMs+=61000;assert(haLocalTimeText()=="2026-01-01T08:01:01");
     clockEvent(subscription,1767225660,-18000,"America/New_York",true);

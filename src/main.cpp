@@ -200,14 +200,44 @@ static int g_acCursor = 0;
 static bool g_acEditing = false;
 static float g_acDraftTemp = NAN;
 
+static constexpr int KEYPAD_IRQ_PIN = 35;  // Calculator3 schematic: G35_INT.
+static constexpr uint32_t KEYPAD_IRQ_RETRY_MS = 20;
+static constexpr uint32_t KEYPAD_IRQ_HEALTH_MS = 1000;
+static bool g_keypadIrqAvailable = false, g_keypadIrqVerified = false;
+static bool g_keypadIrqFault = false;
+static volatile bool g_keypadIrqPending = false;
+static uint32_t g_keypadReadCount = 0, g_keypadIrqReads = 0, g_keypadIrqFaults = 0;
 static uint32_t g_lastKeyPoll = 0;
 static uint32_t g_lastKeyTime = 0;
 static char g_lastKey = 0;
+
+static void IRAM_ATTR keypadInterrupt() { g_keypadIrqPending = true; }
+
+static uint32_t keypadPollIntervalMs() {
+    if (!connectedPowerIdle()) return 20;
+    return g_keypadIrqVerified ? KEYPAD_IRQ_HEALTH_MS : 100;
+}
+
+static String keypadStatus() {
+    return "keypad_poll_ms=" + String(keypadPollIntervalMs()) +
+           " keypad_irq_pin=" + String(g_keypadIrqAvailable ? KEYPAD_IRQ_PIN : -1) +
+           " keypad_irq_verified=" + String(g_keypadIrqVerified ? 1 : 0) +
+           " keypad_irq_low=" + String(g_keypadIrqAvailable && digitalRead(KEYPAD_IRQ_PIN) == LOW ? 1 : 0) +
+           " keypad_reads=" + String(g_keypadReadCount) +
+           " keypad_irq_reads=" + String(g_keypadIrqReads) +
+           " keypad_irq_faults=" + String(g_keypadIrqFaults);
+}
 
 static void keypadInit() {
     // The keypad and IP5306 share GPIO21/22 on Core Basic. M5.begin()
     // already owns this bus; Wire.begin() would install a second driver.
     bool present = M5.In_I2C.scanID((uint8_t)0x08, 100000);
+    g_keypadIrqAvailable = present && M5.getBoard() == m5::board_t::board_M5Stack;
+    if (g_keypadIrqAvailable) {
+        pinMode(KEYPAD_IRQ_PIN, INPUT);  // GPIO35 has no internal pull-up.
+        attachInterrupt(digitalPinToInterrupt(KEYPAD_IRQ_PIN), keypadInterrupt, FALLING);
+        g_keypadIrqPending = digitalRead(KEYPAD_IRQ_PIN) == LOW;
+    }
     Serial.printf("[keypad] i2c 0x08 %s\n", present ? "present" : "missing");
 }
 
@@ -223,15 +253,33 @@ static uint8_t keypadReadByte() {
 
 static char keypadPoll() {
     uint32_t now = millis();
-    uint32_t interval = connectedPowerIdle() ? 100 : 20;
+    bool irqLow = g_keypadIrqAvailable && digitalRead(KEYPAD_IRQ_PIN) == LOW;
+    if (!irqLow) g_keypadIrqFault = false;
+    bool irqRequested = g_keypadIrqAvailable && !g_keypadIrqFault &&
+                        (g_keypadIrqPending || irqLow);
+    uint32_t interval = irqRequested ? KEYPAD_IRQ_RETRY_MS : keypadPollIntervalMs();
     if (now - g_lastKeyPoll < interval) return 0;
     g_lastKeyPoll = now;
+    // Clear before I2C so an interrupt arriving during the read is retained.
+    g_keypadIrqPending = false;
+    ++g_keypadReadCount;
+    if (irqRequested) ++g_keypadIrqReads;
 
     uint8_t raw = keypadReadByte();
-    if (raw == 0 || raw == 0xFF) return 0;
-
-    char c = remapKeypadKey(raw);
-    if (c == 0) return 0;
+    char c = (raw == 0 || raw == 0xFF) ? 0 : remapKeypadKey(raw);
+    bool irqReleased = g_keypadIrqAvailable && digitalRead(KEYPAD_IRQ_PIN) != LOW;
+    if (c && irqLow && irqReleased) {
+        // A real key must pull IRQ low and its read must release it. Until
+        // this is observed, keep ordinary polling for missing/legacy wiring.
+        g_keypadIrqVerified = true;
+        g_keypadIrqFault = false;
+    } else if ((c && g_keypadIrqVerified && !irqRequested) ||
+               (!c && irqRequested && !irqReleased)) {
+        g_keypadIrqVerified = false;
+        g_keypadIrqFault = !irqReleased;
+        ++g_keypadIrqFaults;
+    }
+    if (!c) return 0;
 
     if (c == g_lastKey && now - g_lastKeyTime < 120) return 0;
     g_lastKey = c;
@@ -465,6 +513,12 @@ static bool validTemp(float value) {
 // ---------------------------------------------------------------------
 //  Backlight schedule
 // ---------------------------------------------------------------------
+static constexpr uint32_t BACKLIGHT_SCHEDULE_INTERVAL_MS = 60000;
+static bool g_scheduleStarted = false, g_scheduleObservedClock = false;
+static bool g_scheduleClockReady = false, g_scheduleNight = false;
+static uint32_t g_scheduleClockCheckedAt = 0, g_nextBacklightCheck = 0;
+static uint32_t g_backlightChecks = 0, g_backlightClockChecks = 0;
+
 static void applyBacklightPercent(int percent) {
     percent = constrain(percent, 0, 100);
     g_backlightPercent = (uint8_t)percent;
@@ -518,22 +572,37 @@ static void applyBacklightPlan(BacklightPlan plan) {
 }
 
 static void scheduleTick(bool explicitInput) {
-    struct tm timeinfo;
-    bool clockReady = haGetLocalTime(timeinfo);
-    int period = -1;
-    if (clockReady) {
-        int now = timeinfo.tm_hour * 60 + timeinfo.tm_min;
-        bool isDay = inTimeRange(now, g_config.dayStart, g_config.dayEnd);
-        bool isNight = inTimeRange(now, g_config.nightStart, g_config.nightEnd);
-        period = isDay ? 0 : (isNight ? 1 : 0);
+    uint32_t now = millis();
+    bool clockAvailable = haClockReady();
+    bool refreshClock = !g_scheduleStarted ||
+        clockAvailable != g_scheduleObservedClock ||
+        now - g_scheduleClockCheckedAt >= BACKLIGHT_SCHEDULE_INTERVAL_MS;
+    if (!explicitInput && !refreshClock && (int32_t)(now - g_nextBacklightCheck) < 0) return;
+
+    if (refreshClock) {
+        struct tm timeinfo;
+        g_scheduleObservedClock = clockAvailable;
+        g_scheduleClockReady = haGetLocalTime(timeinfo);
+        g_scheduleNight = false;
+        if (g_scheduleClockReady) {
+            int minute = timeinfo.tm_hour * 60 + timeinfo.tm_min;
+            bool isDay = inTimeRange(minute, g_config.dayStart, g_config.dayEnd);
+            bool isNight = inTimeRange(minute, g_config.nightStart, g_config.nightEnd);
+            g_scheduleNight = !isDay && isNight;
+        }
+        g_scheduleClockCheckedAt = now;
+        ++g_backlightClockChecks;
     }
-    bool night = period == 1;
+    g_scheduleStarted = true;
+    ++g_backlightChecks;
+    bool clockReady = g_scheduleClockReady;
+    bool night = g_scheduleNight;
     uint8_t brightness = clockReady ? (night ? g_config.nightBrightness : g_config.dayBrightness)
                                     : g_config.brightness;
     uint8_t dimBrightness = night ? g_config.nightDimBrightness : g_config.dayDimBrightness;
     BacklightPlan plan = {BacklightPhase::Normal, brightness};
     if (clockReady) {
-        plan = planBacklight(millis() - g_lastActivity, brightness, dimBrightness,
+        plan = planBacklight(now - g_lastActivity, brightness, dimBrightness,
                              night ? g_config.nightDimSeconds : g_config.dayDimSeconds,
                              night ? g_config.nightOffSeconds : g_config.dayOffSeconds);
     }
@@ -546,6 +615,19 @@ static void scheduleTick(bool explicitInput) {
         plan = limitAutomaticBacklight(plan, {g_backlightPhase, g_backlightPercent});
     }
     applyBacklightPlan(plan);
+
+    // Only the inexpensive due check runs each loop. Recalculate the time of
+    // day once a minute; wake at exact idle deadlines without converting time.
+    uint32_t delayMs = BACKLIGHT_SCHEDULE_INTERVAL_MS - (now - g_scheduleClockCheckedAt);
+    if (clockReady && g_backlightOverride < 0 && g_backlightPhase != BacklightPhase::Off) {
+        uint32_t idleMs = now - g_lastActivity;
+        uint32_t dimAt = uint32_t(night ? g_config.nightDimSeconds : g_config.dayDimSeconds) * 1000;
+        uint32_t offSeconds = night ? g_config.nightOffSeconds : g_config.dayOffSeconds;
+        uint32_t offAt = dimAt + offSeconds * 1000;
+        if (dimAt && idleMs < dimAt && dimAt - idleMs < delayMs) delayMs = dimAt - idleMs;
+        if (offSeconds && idleMs < offAt && offAt - idleMs < delayMs) delayMs = offAt - idleMs;
+    }
+    g_nextBacklightCheck = now + delayMs;
 }
 
 bool setDisplayMode(const String& mode) {
@@ -567,10 +649,13 @@ String backlightStatus() {
     return "backlight=" + String(state) + " backlight_pwm=" + String(g_appliedBrightness) +
            " dim_theme=" + String((int)g_dimTheme) +
            " display_override=" + String(g_backlightOverride) +
+           " backlight_clock_interval_ms=" + String(BACKLIGHT_SCHEDULE_INTERVAL_MS) +
+           " backlight_clock_checks=" + String(g_backlightClockChecks) +
+           " backlight_checks=" + String(g_backlightChecks) +
            " lcd_sleep=" + String(g_lcdSleeping ? 1 : 0) +
            " audio_quiet=" + String(g_audioQuiet ? 1 : 0) +
            " power_sample_interval_ms=" + String(powerSampleIntervalMs()) +
-           " keypad_poll_ms=" + String(connectedPowerIdle() ? 100 : 20);
+           " " + keypadStatus();
 }
 
 // ---------------------------------------------------------------------
