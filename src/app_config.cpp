@@ -460,8 +460,8 @@ static void handleRoot() {
 
     page += "<fieldset><legend>Device</legend>";
     page += "<div class=\"actions device-actions\">"
-            "<a class=\"button-link\" href=\"/update\">Update firmware</a>"
-            "<a class=\"button-link\" href=\"/screenshot.bmp\" download=\"ha-remote-screen.bmp\">Download screenshot</a></div>";
+            "<a class=\"button-link\" href=\"/update\">Update</a>"
+            "<a class=\"button-link\" href=\"/screenshot.bmp\" download=\"ha-remote-screen.bmp\">Screenshot</a></div>";
     page += "<dl class=\"metadata device-info\"><dt>Serial baud</dt><dd>115200</dd></dl>";
     page += "</fieldset>";
 
