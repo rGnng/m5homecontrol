@@ -134,44 +134,48 @@ int main(){
     std::puts("PASS: actual keypad IRQ verification, reduced reads, prompt keys, legacy/missing/stuck wiring, I2C failures, ISR races, debounce and rollover");
 
     resetSchedule();scheduleTick();assert(timeConversions==1 && applies==1 && g_backlightPercent==20);
-    for(now=20;now<60000;now+=20)scheduleTick();
+    for(now=20;now<1000;now+=20)scheduleTick();
     assert(timeConversions==1 && applies==1);
     scheduleTick();assert(timeConversions==2 && applies==2);
-    // Idle deadlines remain exact while all intervening loops skip clock work.
+    // Idle deadlines remain exact; intervening loop iterations skip clock work.
     resetSchedule();g_config.dayDimSeconds=2;g_config.dayOffSeconds=3;scheduleTick();
-    assert(g_nextBacklightCheck==2000);
-    now=1999;scheduleTick();assert(g_backlightPhase==BacklightPhase::Normal && applies==1);
+    assert(g_nextBacklightCheck==1000);
+    for(now=20;now<2000;now+=20)scheduleTick();
+    now=1999;scheduleTick();assert(g_backlightPhase==BacklightPhase::Normal && applies==2);
     now=2000;scheduleTick();assert(g_backlightPhase==BacklightPhase::Dim && g_backlightPercent==3);
-    assert(timeConversions==1 && g_nextBacklightCheck==5000);
-    now=4999;scheduleTick();assert(applies==2);
-    now=5000;scheduleTick();assert(g_backlightPhase==BacklightPhase::Off && timeConversions==1);
+    assert(timeConversions==3 && g_nextBacklightCheck==3000);
+    for(now=2020;now<5000;now+=20)scheduleTick();
+    now=4999;scheduleTick();assert(applies==5);
+    now=5000;scheduleTick();assert(g_backlightPhase==BacklightPhase::Off && timeConversions==6);
     now=5001;noteActivity();assert(g_backlightPhase==BacklightPhase::Normal && g_lastActivity==5001);
-    assert(g_nextBacklightCheck==7001 && timeConversions==1);
+    assert(g_nextBacklightCheck==6000 && timeConversions==6);
     assert(setDisplayMode("off") && g_backlightPhase==BacklightPhase::Off);
     assert(setDisplayMode("wake") && g_backlightPhase==BacklightPhase::Normal);
     assert(setDisplayMode("dim") && g_backlightPhase==BacklightPhase::Dim);
-    assert(!setDisplayMode("invalid"));
-    assert(timeConversions==1);
+    assert(!setDisplayMode("invalid"));assert(timeConversions==6);
     resetSchedule();scheduleTick();
-    for(now=100;now<60000;now+=100)noteActivity();
-    assert(timeConversions==1 && g_backlightClockChecks==1 && applies==600);
+    for(now=20;now<1000;now+=20)noteActivity();
+    assert(timeConversions==1 && g_backlightClockChecks==1 && applies==50);
     scheduleTick();assert(timeConversions==2);
-    // First HA time is applied immediately; subsequent day/night checks are minute-spaced.
+    // First HA time is immediate; subsequent day/night checks are second-spaced.
     resetSchedule();clockAvailable=false;scheduleTick();assert(g_backlightPercent==30);
     now=10;clockAvailable=true;scheduleTick();assert(g_backlightPercent==20 && timeConversions==2);
     resetSchedule();clockHour=20;clockMinute=59;scheduleTick();
-    now=59999;clockHour=21;clockMinute=0;scheduleTick();assert(g_backlightPercent==20);
-    now=60000;scheduleTick();assert(g_backlightPercent==10 && timeConversions==2);
-    clockHour=12;now=120000;scheduleTick();assert(g_backlightPercent==20);
+    now=999;clockHour=21;clockMinute=0;scheduleTick();assert(g_backlightPercent==20);
+    now=1000;scheduleTick();assert(g_backlightPercent==10 && timeConversions==2);
+    clockHour=12;now=2000;scheduleTick();assert(g_backlightPercent==20);
     noteActivity();assert(g_backlightPercent==20);
     // Disabled timers and rollover never cause a busy loop or premature dim.
     resetSchedule(UINT32_MAX-1000);g_config.dayDimSeconds=2;g_config.dayOffSeconds=3;
-    scheduleTick();now=998;scheduleTick();assert(applies==1);
-    now=999;scheduleTick();assert(g_backlightPhase==BacklightPhase::Dim && timeConversions==1);
-    now=3999;scheduleTick();assert(g_backlightPhase==BacklightPhase::Off && timeConversions==1);
-    resetSchedule(UINT32_MAX-1000);scheduleTick();now=58998;scheduleTick();assert(applies==1);
-    now=58999;scheduleTick();assert(applies==2 && timeConversions==2);
-    std::puts("PASS: actual minute clock cache, skipped background work, exact idle deadlines, immediate input/web wake, first time sync, day/night, disabled timers and rollover");
+    scheduleTick();now=UINT32_MAX-1;scheduleTick();assert(applies==1);
+    now=UINT32_MAX;scheduleTick();assert(applies==2);
+    now=998;scheduleTick();assert(applies==2);
+    now=999;scheduleTick();assert(g_backlightPhase==BacklightPhase::Dim && timeConversions==3);
+    now=3999;scheduleTick();assert(g_backlightPhase==BacklightPhase::Off && timeConversions==4);
+    resetSchedule(UINT32_MAX-1000);scheduleTick();now=UINT32_MAX-1;scheduleTick();assert(applies==1);
+    now=UINT32_MAX;scheduleTick();assert(applies==2 && timeConversions==2);
+    now=0;scheduleTick();assert(applies==2);
+    std::puts("PASS: actual second clock cache, skipped background work, exact idle deadlines, immediate input/web wake, first time sync, day/night, disabled timers and rollover");
 }
 '''
 keypad = source[source.index('static constexpr int KEYPAD_IRQ_PIN'):source.index('// The LED task')]

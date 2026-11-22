@@ -149,10 +149,8 @@ after undocking. A plug means assumed dock power, not confirmed charging/full;
 `?` means no current battery reading and does not mean empty.
 
 Web -> Display -> **Refresh battery status**, or `GET /power`, reports the
-battery percentage, battery voltage, USB-input voltage, and Core USB charger.
-Voltage fields show `Unavailable` when the hardware does not expose a reading.
-In particular, the Core Basic's IP5306 has no readable battery/VBUS voltage;
-a percentage reading is not converted into a made-up voltage.
+approximate battery percentage when available. Core Basic's IP5306 does not
+expose battery/VBUS voltage readings.
 `/diag` uses `charging=unknown` when there is no confirmed charging/full signal;
 an inactive Core charger is not proof that the dock is not charging.
 It also reports `dock_inferred`, `pmic_online`, `core_keep_on`, `core_boost_enabled`,
@@ -186,10 +184,9 @@ dock hint to change its power policy.
   Active polling remains 20 ms. Unverified, missing or faulty IRQ wiring retains
   100 ms idle polling; a key found by health polling restores this fallback
   automatically.
-- Day/night backlight calculations run once per minute. Dim/off timers run at
+- Day/night backlight calculations run once per second. Dim/off timers run at
   their exact deadlines; button input, web previews and the first HA clock sync
-  apply immediately. The minute interval can delay a day/night boundary by up
-  to 60 seconds.
+  apply immediately.
 - PMIC sampling slows from 500 ms to 5 seconds while idle. Explicit battery
   refresh bypasses the sample cache.
 - HA sends state updates only for configured primary and AUX entities. Commands

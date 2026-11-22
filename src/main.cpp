@@ -513,7 +513,7 @@ static bool validTemp(float value) {
 // ---------------------------------------------------------------------
 //  Backlight schedule
 // ---------------------------------------------------------------------
-static constexpr uint32_t BACKLIGHT_SCHEDULE_INTERVAL_MS = 60000;
+static constexpr uint32_t BACKLIGHT_SCHEDULE_INTERVAL_MS = 1000;
 static bool g_scheduleStarted = false, g_scheduleObservedClock = false;
 static bool g_scheduleClockReady = false, g_scheduleNight = false;
 static uint32_t g_scheduleClockCheckedAt = 0, g_nextBacklightCheck = 0;
@@ -617,7 +617,7 @@ static void scheduleTick(bool explicitInput) {
     applyBacklightPlan(plan);
 
     // Only the inexpensive due check runs each loop. Recalculate the time of
-    // day once a minute; wake at exact idle deadlines without converting time.
+    // day once a second; wake at exact idle deadlines without converting time.
     uint32_t delayMs = BACKLIGHT_SCHEDULE_INTERVAL_MS - (now - g_scheduleClockCheckedAt);
     if (clockReady && g_backlightOverride < 0 && g_backlightPhase != BacklightPhase::Off) {
         uint32_t idleMs = now - g_lastActivity;

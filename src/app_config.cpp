@@ -259,8 +259,8 @@ static String htmlHeader(const String& title) {
     h += ".col{min-width:0}";
     h += "fieldset{min-width:0;border:1px solid #333;margin:0 0 18px;padding:12px 14px;background:#080808}";
     h += "legend{font-weight:600;padding:0 4px;color:#fff}label{display:block;margin:10px 0 4px;font-size:14px;color:#bbb}";
-    h += "input{width:100%;box-sizing:border-box;padding:8px;border:1px solid #444;border-radius:0;font:inherit;background:#111;color:#eee}";
-    h += "input:focus{outline:none;border-color:#aaa}";
+    h += "input,select{width:100%;box-sizing:border-box;padding:8px;border:1px solid #444;border-radius:0;font:inherit;background:#111;color:#eee}";
+    h += "input:focus,select:focus{outline:none;border-color:#aaa}";
     h += "button{margin-top:16px;padding:10px 18px;border:1px solid #666;border-radius:0;background:#111;color:#eee;font:inherit}";
     h += "button[type=submit]{background:#eee;color:#000;border-color:#eee}";
     h += "button.remove{margin:0;padding:6px 9px;background:#111;color:#ddd;border:1px solid #555}";
@@ -273,7 +273,11 @@ static String htmlHeader(const String& title) {
     h += "th{text-align:left;font-size:12px;color:#888;font-weight:600;padding:4px 0}";
     h += ".modesrow td{padding:0 0 10px}.modelabel{font-size:12px;color:#888;margin-right:8px}";
     h += ".auxfields{display:grid;grid-template-columns:1fr 1fr;gap:8px}";
-    h += ".schedule-scroll{overflow-x:auto}.schedule-scroll table{min-width:560px}";
+    h += ".schedule-period{margin:12px 0 16px}.schedule-title{font-weight:600;color:#ddd}";
+    h += ".schedule-line{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:8px}";
+    h += ".schedule-times{grid-template-columns:repeat(2,minmax(0,1fr))}";
+    h += ".schedule-line label{min-width:0;margin:0;font-size:12px;display:flex;flex-direction:column;justify-content:flex-end}";
+    h += ".schedule-line input{min-width:0;margin-top:5px;padding:8px 5px;font-size:14px}";
     h += "label.inline{display:inline-flex;align-items:center;gap:4px;margin:0 10px 0 0;font-size:12px;color:#aaa}";
     h += "label.inline input{width:auto;margin:0}";
     h += ".pagehead{font-weight:600;margin:18px 0 6px;color:#fff}";
@@ -304,25 +308,11 @@ static void sendMessagePage(const String& title, const String& message) {
     server.send(200, "text/html", page);
 }
 
-static String voltageText(int millivolts) {
-    if (millivolts < 0) return "Unavailable";
-    return String(millivolts / 1000.0f, 3) + " V";
-}
-
 static String powerSummary() {
     PowerStatus power = readPowerStatus(true);
     String text = "Battery: ";
     text += power.batteryPercent < 0 ? String("Unavailable")
                                     : String(power.batteryPercent) + "% (approximate)";
-    text += "\nBattery voltage: " + voltageText(power.batteryMillivolts);
-    text += "\nUSB input voltage: " + voltageText(power.inputMillivolts);
-    text += "\nCore USB charger: ";
-    switch (power.coreCharging) {
-        case ChargeState::Charging: text += "Charging"; break;
-        case ChargeState::Full: text += "Full"; break;
-        case ChargeState::Inactive: text += "Inactive"; break;
-        default: text += "Unavailable"; break;
-    }
     return text;
 }
 
@@ -398,29 +388,27 @@ static void handleRoot() {
     page += "<label>Fallback brightness (%)</label><input name=\"bright\" type=\"number\" min=\"1\" max=\"100\" value=\"" +
             String(g_config.brightness) + "\">";
     page += "<div class=\"pagehead\">Backlight Schedule</div>";
-    page += "<div class=\"schedule-scroll\"><table><tbody>";
-    page += "<tr><th></th><th>Start</th><th>End</th><th>Brightness %</th>"
-            "<th>Dim %</th><th>Dim after (s)</th><th>Off after dim (s)</th></tr>";
     auto scheduleRow = [&](const char* label, const char* prefix, uint16_t start, uint16_t end,
                            uint8_t brightness, uint8_t dimBrightness, uint16_t dim, uint16_t off) {
-        page += "<tr><td>" + String(label) + "</td>";
-        page += "<td><input name=\"" + String(prefix) + "start\" type=\"time\" value=\"" + formatTime(start) + "\"></td>";
-        page += "<td><input name=\"" + String(prefix) + "end\" type=\"time\" value=\"" + formatTime(end) + "\"></td>";
-        auto number = [&](const char* suffix, unsigned value, unsigned min, unsigned max) {
-            page += "<td><input name=\"" + String(prefix) + suffix + "\" type=\"number\" min=\"" +
-                    String(min) + "\" max=\"" + String(max) + "\" value=\"" + String(value) + "\"></td>";
+        page += "<div class=\"schedule-period\"><div class=\"schedule-title\">" + String(label) + "</div>";
+        page += "<div class=\"schedule-line schedule-times\">";
+        page += "<label>Start<input name=\"" + String(prefix) + "start\" type=\"time\" value=\"" + formatTime(start) + "\"></label>";
+        page += "<label>End<input name=\"" + String(prefix) + "end\" type=\"time\" value=\"" + formatTime(end) + "\"></label>";
+        auto number = [&](const char* title, const char* suffix, unsigned value, unsigned min, unsigned max) {
+            page += "<label>" + String(title) + "<input name=\"" + String(prefix) + suffix + "\" type=\"number\" min=\"" +
+                    String(min) + "\" max=\"" + String(max) + "\" value=\"" + String(value) + "\"></label>";
         };
-        number("bright", brightness, 0, 100);
-        number("dimbright", dimBrightness, 1, 100);
-        number("dim", dim, 0, 3600);
-        number("off", off, 0, 3600);
-        page += "</tr>";
+        page += "</div><div class=\"schedule-line\">";
+        number("Brightness %", "bright", brightness, 0, 100);
+        number("Dim %", "dimbright", dimBrightness, 1, 100);
+        number("Dim after (s)", "dim", dim, 0, 3600);
+        number("Off after dim (s)", "off", off, 0, 3600);
+        page += "</div></div>";
     };
-    scheduleRow("day", "d", g_config.dayStart, g_config.dayEnd, g_config.dayBrightness,
+    scheduleRow("Day", "d", g_config.dayStart, g_config.dayEnd, g_config.dayBrightness,
                 g_config.dayDimBrightness, g_config.dayDimSeconds, g_config.dayOffSeconds);
-    scheduleRow("night", "n", g_config.nightStart, g_config.nightEnd, g_config.nightBrightness,
+    scheduleRow("Night", "n", g_config.nightStart, g_config.nightEnd, g_config.nightBrightness,
                 g_config.nightDimBrightness, g_config.nightDimSeconds, g_config.nightOffSeconds);
-    page += "</tbody></table></div>";
     page += "<p>0 = disabled. Without dimming, Off counts from last input.</p>";
     page += "<p>HA timezone: " + htmlEscape(haTimeZone()) +
             "<br>HA time: " + htmlEscape(haLocalTimeText()) + "</p>";
