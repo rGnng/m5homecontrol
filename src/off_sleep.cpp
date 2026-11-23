@@ -9,6 +9,21 @@ static uint64_t g_sleptMs = 0;
 static OffWake g_lastWake = OffWake::Timer;
 static constexpr gpio_num_t WAKE_PINS[] = {GPIO_NUM_39, GPIO_NUM_38, GPIO_NUM_37, GPIO_NUM_35};
 
+// Wakeup changes int_type to a level trigger. gpio_wakeup_disable() only
+// clears wakeup_enable on ESP32; it does not restore a normal polled input.
+// All callers detach the keypad ISR before entry and restore its edge trigger
+// afterward. Core buttons and the dock input are polled while awake.
+static void disarmWakePin(gpio_num_t pin) {
+    gpio_intr_disable(pin);
+    gpio_wakeup_disable(pin);
+    gpio_set_intr_type(pin, GPIO_INTR_DISABLE);
+}
+
+void resetOffSleepWakePins() {
+    for (auto pin : WAKE_PINS) disarmWakePin(pin);
+    disarmWakePin(GPIO_NUM_26);
+}
+
 OffWake sleepWhileOff(bool keypadWake, uint32_t timerMs, int dockLevel) {
     unsigned count = keypadWake ? 4 : 3;
     unsigned armed = 0;
@@ -19,12 +34,14 @@ OffWake sleepWhileOff(bool keypadWake, uint32_t timerMs, int dockLevel) {
     }
     if (dockLevel >= 0 && gpio_get_level(GPIO_NUM_26) != dockLevel) return OffWake::DockChange;
     for (; armed < count; ++armed) {
+        gpio_intr_disable(WAKE_PINS[armed]);
         if (gpio_wakeup_enable(WAKE_PINS[armed], GPIO_INTR_LOW_LEVEL) != ESP_OK) {
             ready = false;
             break;
         }
     }
     if (ready && dockLevel >= 0) {
+        gpio_intr_disable(GPIO_NUM_26);
         dockArmed = gpio_wakeup_enable(GPIO_NUM_26,
             dockLevel == 0 ? GPIO_INTR_HIGH_LEVEL : GPIO_INTR_LOW_LEVEL) == ESP_OK;
         ready = dockArmed;
@@ -38,8 +55,8 @@ OffWake sleepWhileOff(bool keypadWake, uint32_t timerMs, int dockLevel) {
         Serial.flush();
         result = esp_light_sleep_start();
     }
-    for (unsigned i = 0; i < armed; ++i) gpio_wakeup_disable(WAKE_PINS[i]);
-    if (dockArmed) gpio_wakeup_disable(GPIO_NUM_26);
+    for (unsigned i = 0; i < armed; ++i) disarmWakePin(WAKE_PINS[i]);
+    if (dockArmed) disarmWakePin(GPIO_NUM_26);
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
     if (result != ESP_OK) {

@@ -20,15 +20,20 @@ gpio = r'''
 #pragma once
 #include <cassert>
 #include <set>
+#include <map>
 using gpio_num_t=int;
 inline constexpr int GPIO_NUM_39=39,GPIO_NUM_38=38,GPIO_NUM_37=37,GPIO_NUM_35=35,GPIO_NUM_26=26;
-inline constexpr int GPIO_INTR_LOW_LEVEL=0,GPIO_INTR_HIGH_LEVEL=1,ESP_OK=0,ESP_FAIL=-1;
+inline constexpr int GPIO_INTR_DISABLE=0,GPIO_INTR_LOW_LEVEL=4,GPIO_INTR_HIGH_LEVEL=5,ESP_OK=0,ESP_FAIL=-1;
 inline std::set<int> lowPins,armedPins;
+inline std::map<int,int> interruptTypes;
+inline std::set<int> cpuInterrupts;
 inline int failPin=-1;
 inline int dockMode=-1;
 inline int gpio_get_level(int pin){return lowPins.count(pin)?0:1;}
-inline int gpio_wakeup_enable(int pin,int mode){if(pin==26)dockMode=mode;else assert(mode==GPIO_INTR_LOW_LEVEL);if(pin==failPin)return ESP_FAIL;armedPins.insert(pin);return ESP_OK;}
-inline int gpio_wakeup_disable(int pin){assert(armedPins.erase(pin)==1);return ESP_OK;}
+inline int gpio_wakeup_enable(int pin,int mode){if(pin==26)dockMode=mode;else assert(mode==GPIO_INTR_LOW_LEVEL);if(pin==failPin)return ESP_FAIL;interruptTypes[pin]=mode;armedPins.insert(pin);return ESP_OK;}
+inline int gpio_wakeup_disable(int pin){armedPins.erase(pin);return ESP_OK;}
+inline int gpio_intr_disable(int pin){cpuInterrupts.erase(pin);return ESP_OK;}
+inline int gpio_set_intr_type(int pin,int mode){interruptTypes[pin]=mode;return ESP_OK;}
 '''
 sleep = r'''
 #pragma once
@@ -51,8 +56,17 @@ hardware_tests = r'''
 #include "off_sleep.h"
 #include <esp_sleep.h>
 #include <cstdio>
-static void clean(){assert(armedPins.empty() && !gpioEnabled && !timerEnabled);}
+static void clean(){
+    assert(armedPins.empty() && !gpioEnabled && !timerEnabled && cpuInterrupts.empty());
+    for(auto entry:interruptTypes)assert(entry.second==GPIO_INTR_DISABLE);
+}
 int main(){
+    // A software/watchdog restart can preserve level triggers. Arduino's
+    // pinMode() would retain these and gpio_config() re-enable the interrupt.
+    for(int pin:{26,35,37,38,39}){
+        interruptTypes[pin]=GPIO_INTR_LOW_LEVEL;cpuInterrupts.insert(pin);armedPins.insert(pin);
+    }
+    resetOffSleepWakePins();clean();
     assert(sleepWhileOff(true,1000)==OffWake::Timer);clean();
     assert(pinsAtSleep==std::set<int>({35,37,38,39}) && timerMicros==1000000);
     assert(offSleepStatus().find("light_sleep_entries=1 light_sleep_ms=1000 light_sleep_errors=0")!=String::npos);

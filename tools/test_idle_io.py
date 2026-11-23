@@ -148,6 +148,12 @@ int main(){
     now=20;assert(!keypadPoll() && g_keypadDiscardWakeKey);
     busOk=true;now=120;assert(!keypadPoll() && !g_keypadDiscardWakeKey && !rawKey);
     now=140;key('9');assert(keypadPoll()=='3');
+    // A stuck IRQ must not suppress every future key after deep wake. A
+    // successful empty buffer drains the wake key without trusting the pin.
+    resetKeypad();deepBoot=true;releaseOnRead=false;key('7');
+    restoreKeypadAfterDeepSleep();keypadInit();
+    now=20;assert(!keypadPoll() && !g_keypadDiscardWakeKey && g_keypadIrqFault);
+    now=120;key('9');assert(keypadPoll()=='3' && g_keypadIrqFault);
     std::puts("PASS: actual keypad IRQ verification, reduced reads, prompt keys, legacy/missing/stuck wiring, I2C failures, ISR races, debounce and rollover");
 
     resetSchedule();scheduleTick();assert(timeConversions==1 && applies==1 && g_backlightPercent==20);

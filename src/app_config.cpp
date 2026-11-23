@@ -9,11 +9,13 @@
 #include <esp_system.h>
 #include <esp_wifi.h>
 #include <esp_netif.h>
+#include <esp_core_dump.h>
 
 #include "ha_client.h"
 #include "connected_power.h"
 #include "html_stream.h"
 #include "power_status.h"
+#include "guarded_web_server.h"
 
 static const char* NVS_NAMESPACE = "haremote";
 static const char* DEFAULT_HA_URL = "";
@@ -23,7 +25,7 @@ static constexpr size_t HOSTNAME_MAX_LENGTH = 31;
 
 AppConfig g_config;
 
-static WebServer server(80);
+static GuardedWebServer server(80);
 static bool g_apMode = false;
 static bool g_routesReady = false;
 static bool g_serverStarted = false;
@@ -457,9 +459,7 @@ static void handleRoot() {
     page += "</div><label>Low battery warning</label><select name=\"lowbat\">";
     page += "<option value=\"on\"" + String(g_config.lowBatteryWarning ? " selected" : "") + ">On</option>";
     page += "<option value=\"off\"" + String(!g_config.lowBatteryWarning ? " selected" : "") + ">Off</option></select>";
-    page += "<p>When undocked and below 25%, the LEDs flash red twice every minute. "
-            "Runs while awake or in light sleep; deep sleep stays uninterrupted. "
-            "Unknown battery readings do not trigger a warning.</p></fieldset>";
+    page += "<p>Below 25% and undocked: two red flashes per minute.</p></fieldset>";
 
     page += "<fieldset><legend>Display</legend>";
     page += "<label>Theme</label><select name=\"theme\">";
@@ -498,12 +498,7 @@ static void handleRoot() {
     scheduleRow("Night", "n", g_config.nightStart, g_config.nightEnd, g_config.nightBrightness,
                 g_config.nightDimBrightness, g_config.nightDimSeconds, g_config.nightOffSeconds, g_config.nightSleepMode);
     page += "<p>0 = disabled. Without dimming, Off counts from last input.</p>";
-    page += "<p>Off uses the active day/night sleep mode, including R5C1 and web Off. "
-            "Light sleep resumes the current view; keypad or Core A/B/C wakes it. "
-            "The keypad wakes deep sleep into the normal view; docking wakes either sleep mode into Dim. "
-            "While docked, only the screen turns off; Wi-Fi and web access stay available.</p>";
     page += "<div class=\"pagehead\">Preview display</div>";
-    page += "<p>Dim follows the saved day/night Off timeout. Off follows the saved sleep mode; use the keypad to wake.</p>";
     page += "<div class=\"actions display-preview\" role=\"group\" aria-label=\"Display preview\">"
             "<button type=\"button\" data-display-mode=\"wake\" aria-pressed=\"false\" onclick=\"previewDisplay('wake')\">Wake</button>"
             "<button type=\"button\" data-display-mode=\"dim\" aria-pressed=\"false\" onclick=\"previewDisplay('dim')\">Dim</button>"
@@ -1015,6 +1010,32 @@ static bool firmwareAuthenticated() {
     return server.authenticate(FIRMWARE_UPDATE_USER, FIRMWARE_UPDATE_PASSWORD);
 }
 
+static void handleCrashReport() {
+    if (!firmwareAuthenticated()) {
+        server.requestAuthentication(BASIC_AUTH, "Diagnostics");
+        return;
+    }
+    ConnectedPowerWork powerWork;
+    server.sendHeader("Cache-Control", "no-store");
+    esp_core_dump_summary_t summary = {};
+    esp_err_t result = esp_core_dump_get_summary(&summary);
+    if (result != ESP_OK) {
+        server.send(404, "text/plain", String("No valid crash report: ") + esp_err_to_name(result));
+        return;
+    }
+    String text = "task=" + String(summary.exc_task) +
+                  " pc=" + String(summary.exc_pc, HEX) +
+                  " cause=" + String(summary.ex_info.exc_cause) +
+                  " elf=" + String(reinterpret_cast<const char*>(summary.app_elf_sha256)) +
+                  " corrupted=" + String(summary.exc_bt_info.corrupted ? 1 : 0);
+    for (uint32_t i = 0; i < summary.exc_bt_info.depth && i < 16; ++i)
+        text += " bt=" + String(summary.exc_bt_info.bt[i], HEX);
+    for (unsigned i = 0; i < EPCx_REGISTER_COUNT; ++i)
+        if (summary.ex_info.epcx_reg_bits & (1u << i))
+            text += " epc" + String(i + 1) + "=" + String(summary.ex_info.epcx[i], HEX);
+    server.send(200, "text/plain", text);
+}
+
 static void handleFirmwarePage() {
     if (!firmwareAuthenticated()) {
         server.requestAuthentication(BASIC_AUTH, "Firmware update");
@@ -1190,18 +1211,20 @@ static void handleScreenshot() {
     server.setContentLength(sizeof(header) + imageBytes);
     server.send(200, "image/bmp", "");
     auto client = server.client();
-    if (client.write(header, sizeof(header)) != sizeof(header)) {
+    if (writeClientWithin(client, header, sizeof(header)) != sizeof(header)) {
         client.stop();
         return;
     }
     uint8_t row[rowBytes];
+    uint32_t started = millis();
     // BMP stores the bottom row first and reverses RGB to BGR.
     for (int y=height-1; y>=0; --y) {
+        if (uint32_t(millis() - started) >= 5000) { client.stop(); return; }
         M5.Display.readRectRGB(0, y, width, 1, row);
         for (size_t x=0; x<rowBytes; x+=3) {
             uint8_t red = row[x]; row[x] = row[x+2]; row[x+2] = red;
         }
-        if (client.write(row, sizeof(row)) != sizeof(row)) {
+        if (writeClientWithin(client, row, sizeof(row)) != sizeof(row)) {
             client.stop();
             return;
         }
@@ -1242,6 +1265,7 @@ static void startWebServer() {
         });
         server.on("/update", HTTP_GET, handleFirmwarePage);
         server.on("/update", HTTP_POST, handleFirmwareComplete, handleFirmwareUpload);
+        server.on("/diag/crash", HTTP_GET, handleCrashReport);
         server.on("/diag", HTTP_GET, []() {
             PowerStatus power = readPowerStatus();
             String text = "board=" + String((int)M5.getBoard());

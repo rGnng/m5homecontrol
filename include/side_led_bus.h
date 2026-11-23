@@ -4,38 +4,51 @@
 
 #if M5UNIFIED_RMT_VERSION == 1
 #include <Arduino.h>
-#include <esp32-hal-rmt.h>
+#include <driver/rmt.h>
 #include <vector>
 
-// M5Unified's RMT bus only implements ESP-IDF 5+. Use the Arduino 2.x
-// RMT HAL on ESP-IDF 4, retaining M5.Led's color and brightness handling.
+// M5Unified's RMT bus only implements ESP-IDF 5+. Use the IDF 4 driver
+// directly so a failed transmitter has a finite wait and can be reinitialized.
 class SideLedBus : public m5::LedBus_Base {
 public:
     explicit SideLedBus(int pin) : pin_(pin) {}
     ~SideLedBus() override { release(); }
 
     bool init() override {
-        if (rmt_) return true;
+        if (channel_ >= 0) return true;
         if (pin_ < 0 || pin_ >= GPIO_NUM_MAX ||
             !GPIO_IS_VALID_OUTPUT_GPIO((gpio_num_t)pin_)) return false;
         pinMode(pin_, OUTPUT);
         digitalWrite(pin_, LOW);
-        rmt_ = rmtInit(pin_, RMT_TX_MODE, RMT_MEM_64);
-        if (!rmt_) return false;
-        if (rmtSetTick(rmt_, 25) != 25) {
-            release();
-            return false;
+        rmt_channel_status_result_t status;
+        if (rmt_get_channel_status(&status) != ESP_OK) return false;
+        for (int i = 0; i < RMT_CHANNEL_MAX; ++i) {
+            if (status.status[i] != RMT_CHANNEL_UNINIT) continue;
+            auto channel = static_cast<rmt_channel_t>(i);
+            rmt_config_t config = RMT_DEFAULT_CONFIG_TX(static_cast<gpio_num_t>(pin_), channel);
+            config.clk_div = 2; // APB 80 MHz / 2 = 25 ns ticks.
+            if (rmt_config(&config) != ESP_OK ||
+                rmt_driver_install(channel, 0, ESP_INTR_FLAG_IRAM) != ESP_OK) continue;
+            channel_ = i;
+            return true;
         }
-        return true;
+        return false;
     }
 
     void release() override {
-        if (rmt_) rmtDeinit(rmt_);
-        rmt_ = nullptr;
+        if (channel_ >= 0) {
+            auto channel = static_cast<rmt_channel_t>(channel_);
+            rmt_tx_stop(channel);
+            // All writes below use wait_tx_done=false, so uninstall never
+            // waits for the failed transmission's completion semaphore.
+            rmt_driver_uninstall(channel);
+            channel_ = -1;
+        }
     }
 
     void write(const uint8_t* data, size_t length) override {
-        if (!rmt_ || !data || !length) return;
+        if (!data || !length) return;
+        if (channel_ < 0 && (uint32_t(millis() - lastFailure_) < 1000 || !init())) return;
         items_.resize(length * 8 + 1);
         size_t index = 0;
         for (size_t i = 0; i < length; ++i) {
@@ -53,14 +66,19 @@ public:
         reset.val = 0;
         reset.duration0 = 1600;
         reset.duration1 = 1600;
-        if (!rmtWriteBlocking(rmt_, items_.data(), items_.size())) {
-            Serial.println("[led] RMT transmit failed");
+        auto channel = static_cast<rmt_channel_t>(channel_);
+        if (rmt_write_items(channel, items_.data(), items_.size(), false) != ESP_OK ||
+            rmt_wait_tx_done(channel, pdMS_TO_TICKS(20)) != ESP_OK) {
+            release();
+            lastFailure_ = millis();
+            Serial.println("[led] RMT transmit failed; retrying later");
         }
     }
 
 private:
     int pin_;
-    rmt_obj_t* rmt_ = nullptr;
-    std::vector<rmt_data_t> items_;
+    int channel_ = -1;
+    uint32_t lastFailure_ = 0;
+    std::vector<rmt_item32_t> items_;
 };
 #endif

@@ -15,10 +15,13 @@
 #include "app_config.h"
 #include "connected_power.h"
 #include "deadline_stream.h"
+#include "transfer_budget.h"
+#include "network_io.h"
+#include "async_websocket.h"
 #include "ha_clock.h"
 #include "utf8_text.h"
 
-static WebSocketsClient ws;
+static AsyncWebSocket ws;
 static bool g_wsStarted = false;
 static bool g_dataSuspended = false, g_wsResumePending = false;
 static uint32_t g_dataGeneration = 0, g_discardedHttp = 0;
@@ -398,6 +401,7 @@ static void pollHttpWork() {
 void haSetDataSuspended(bool suspended) {
     if (g_dataSuspended == suspended) return;
     g_dataSuspended = suspended;
+    ws.setSuspended(suspended);
     ++g_dataGeneration;
     if (suspended) {
         g_wsResumePending = false;
@@ -433,13 +437,16 @@ void haSetDataSuspended(bool suspended) {
 
 static bool httpRequestBlocking(const String& baseUrl, const String& token,
                                 const String& method, const String& path,
-                                const String& body, String& response, int& status) {
+                                const String& body, String& response, int& status,
+                                const std::atomic<bool>* cancelled = nullptr) {
     String url = baseUrl + path;
     bool tls = url.startsWith("https://");
 
     HTTPClient http;
-    WiFiClient plain;
-    WiFiClientSecure secure;
+    TransferBudget budget(tls ? 10000 : 5000, 65536, cancelled);
+    BudgetClient<ResponsiveClient> plain(budget);
+    BudgetClient<ResponsiveSecureClient> secure(budget);
+    secure.setHandshakeTimeout(4);
 
     if (tls) {
         secure.setInsecure();
@@ -464,7 +471,9 @@ static bool httpRequestBlocking(const String& baseUrl, const String& token,
     bool ok = (code >= 200 && code < 300);
     response = "";
     if (ok) {
-        response = http.getString();
+        if (http.getSize() > 65536) ok = false;
+        else response = http.getString();
+        if (!budget.allowed()) ok = false;
     } else if (code < 0) {
         Serial.printf("[ha] http %s %s -> %d\n", method.c_str(), path.c_str(), code);
     } else {
@@ -480,7 +489,7 @@ bool haFetchState(EntityState& entity, HaResultCallback complete) {
     const uint32_t revision = entity.revision, generation = g_dataGeneration;
     return runHttpWork([url, token, id](HttpWork& work) {
         return httpRequestBlocking(url, token, "GET", "/api/states/" + id, "",
-                                   work.response, work.status);
+                                   work.response, work.status, &work.cancelled);
     }, [&entity, id, revision, generation, complete](bool ok, const String& body, int) {
         if (generation != g_dataGeneration) { if (complete) complete(false); return; }
         // Live updates received after submission always win, even after errors.
@@ -497,13 +506,16 @@ bool haFetchState(EntityState& entity, HaResultCallback complete) {
 }
 
 static bool fetchEntityOptionsBlocking(const String& baseUrl, const String& token,
-                                       String& optionsHtml, int maxOptions) {
+                                       String& optionsHtml, int maxOptions,
+                                       const std::atomic<bool>* cancelled = nullptr) {
     String url = baseUrl + "/api/states";
     bool tls = url.startsWith("https://");
 
     HTTPClient http;
-    WiFiClient plain;
-    WiFiClientSecure secure;
+    TransferBudget budget(20000, 4 * 1024 * 1024, cancelled);
+    BudgetClient<ResponsiveClient> plain(budget);
+    BudgetClient<ResponsiveSecureClient> secure(budget);
+    secure.setHandshakeTimeout(4);
     if (tls) {
         secure.setInsecure();
         http.begin(secure, url);
@@ -532,7 +544,7 @@ static bool fetchEntityOptionsBlocking(const String& baseUrl, const String& toke
         doc, input, DeserializationOption::Filter(filter));
     http.end();
 
-    if (err) {
+    if (err || !budget.allowed()) {
         Serial.printf("[ha] entity list json %s\n", err.c_str());
         return false;
     }
@@ -560,7 +572,7 @@ bool haFetchEntityOptions(HaOptionsCallback complete, int maxOptions) {
     if (!configComplete()) return false;
     const String url = g_config.haUrl, token = g_config.haToken;
     return runHttpWork([url, token, maxOptions](HttpWork& work) {
-        return fetchEntityOptionsBlocking(url, token, work.response, maxOptions);
+        return fetchEntityOptionsBlocking(url, token, work.response, maxOptions, &work.cancelled);
     }, [complete](bool ok, const String& options, int) {
         if (complete) complete(ok, options);
     });
@@ -578,7 +590,7 @@ bool haCallService(const String& domain, const String& service,
     const String url = g_config.haUrl, token = g_config.haToken;
     const String path = "/api/services/" + domain + "/" + service;
     return runHttpWork([url, token, path, body](HttpWork& work) {
-        return httpRequestBlocking(url, token, "POST", path, body, work.response, work.status);
+        return httpRequestBlocking(url, token, "POST", path, body, work.response, work.status, &work.cancelled);
     }, [complete](bool ok, const String&, int) {
         if (complete) complete(ok);
     }, true, entityId);
@@ -826,6 +838,7 @@ void haBegin() {
 
 void haLoop() {
     pollHttpWork();
+    ws.pollConnect();
     if (g_dataSuspended) return;
     if (g_wsStarted) {
         uint64_t now = clockMillis();

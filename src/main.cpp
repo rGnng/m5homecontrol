@@ -253,13 +253,15 @@ static void keypadInit() {
     Serial.printf("[keypad] i2c 0x08 %s\n", present ? "present" : "missing");
 }
 
-static uint8_t keypadReadByte() {
+static uint8_t keypadReadByte(bool* succeeded = nullptr) {
     // Both Calculator3 and the older MEGA328 panel return key data directly.
     // A register read would consume Calculator3's pending key interrupt.
     uint8_t value = 0;
+    if (succeeded) *succeeded = false;
     if (!M5.In_I2C.start(0x08, true, 100000)) return 0;
     bool readOk = M5.In_I2C.read(&value, 1, true);
     bool stopOk = M5.In_I2C.stop();
+    if (succeeded) *succeeded = readOk && stopOk;
     return readOk && stopOk ? value : 0;
 }
 
@@ -286,7 +288,8 @@ static char keypadPoll() {
     ++g_keypadReadCount;
     if (irqRequested) ++g_keypadIrqReads;
 
-    uint8_t raw = keypadReadByte();
+    bool readSucceeded = false;
+    uint8_t raw = keypadReadByte(&readSucceeded);
     char c = (raw == 0 || raw == 0xFF) ? 0 : remapKeypadKey(raw);
     bool irqReleased = g_keypadIrqAvailable && digitalRead(KEYPAD_IRQ_PIN) != LOW;
     if (c && irqLow && irqReleased) {
@@ -301,7 +304,9 @@ static char keypadPoll() {
         ++g_keypadIrqFaults;
     }
     if (g_keypadDiscardWakeKey) {
-        if (irqReleased) g_keypadDiscardWakeKey = false;
+        // A confirmed empty key buffer also drains the wake key when the IRQ
+        // wire is stuck LOW. Failed I2C reads must never release this guard.
+        if (irqReleased || (readSucceeded && (raw == 0 || raw == 0xFF))) g_keypadDiscardWakeKey = false;
         return 0;
     }
     if (!c) return 0;
@@ -2455,6 +2460,9 @@ void sendScreenshot() {
 //  Setup / loop
 // ---------------------------------------------------------------------
 void setup() {
+    // Arduino pinMode preserves int_type and can re-enable a stale level IRQ.
+    // Clear sleep wake-pin state before any library configures those pads.
+    resetOffSleepWakePins();
     Serial.begin(115200);
     delay(150);
     Serial.println();

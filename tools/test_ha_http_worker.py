@@ -75,7 +75,7 @@ static bool g_wsAuthed=true,g_stateSubscribed=true;
 static uint32_t g_wsClockId=1,g_wsStateId=2,g_dataGeneration=0,g_discardedHttp=0;
 bool haDataSuspended(){return g_dataSuspended;}
 uint32_t haDataGeneration(){return g_dataGeneration;}
-struct {void disconnect(){} void setReconnectInterval(int){} } ws;
+struct {void disconnect(){} void setReconnectInterval(int){} void setSuspended(bool){} } ws;
 static void notifyStatus(bool){}
 static uint32_t lastPump=0;
 static int pumps=0,commandAnimations=0,httpCode=200,httpDelay=100;
@@ -94,10 +94,19 @@ static bool configComplete(){return true;}
 static bool parseState(EntityState& e,JsonVariantConst data){e.state=data["state"].as<String>();return true;}
 struct {template<class... T>void printf(const char*,T...){} } Serial;
 struct WiFiClient : std::istringstream {
-    int read(){return get();}
-    bool connected(){return rdbuf()->in_avail()>0;}
+    virtual ~WiFiClient()=default;
+    virtual int read(){return get();}
+    virtual int read(uint8_t* bytes,size_t length){size_t n=0;while(n<length && rdbuf()->in_avail()>0)bytes[n++]=get();return n?n:-1;}
+    virtual int available(){return rdbuf()->in_avail();}
+    virtual int peek(){return std::istringstream::peek();}
+    virtual size_t write(uint8_t){return 1;}
+    virtual size_t write(const uint8_t*,size_t n){return n;}
+    virtual void stop(){}
+    virtual uint8_t connected(){return rdbuf()->in_avail()>0;}
 };
-struct WiFiClientSecure {void setInsecure(){}};
+struct WiFiClientSecure : WiFiClient {void setInsecure(){}void setHandshakeTimeout(unsigned long){}};
+using ResponsiveClient=WiFiClient;
+using ResponsiveSecureClient=WiFiClientSecure;
 static String httpBody="{}";
 struct ObservedRequest {String url,authorization,body;};
 static std::vector<ObservedRequest> observed;
@@ -110,10 +119,12 @@ struct HTTPClient {
     int GET(){assert(std::this_thread::get_id()!=mainThread);observed.push_back({url,authorization,body});delay(httpDelay);stream.str(httpBody);return httpCode;}
     int POST(const String& value){body=value;return GET();}
     String getString(){return httpBody;}
+    int getSize(){return httpBody.size();}
     WiFiClient& getStream(){return stream;}
     void end(){}
 };
 #include "deadline_stream.h"
+#include "transfer_budget.h"
 '''
 stats = source[source.index('struct HaLinkStats {'):source.index('static uint64_t clockMillis(')]
 worker = source[source.index('struct HttpWork {'):source.index('static bool httpRequestBlocking(')]

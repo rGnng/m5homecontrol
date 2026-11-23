@@ -48,7 +48,7 @@ struct DeepSleep{};
 '''
 system = r'''
 #pragma once
-inline constexpr int ESP_RST_POWERON=1,ESP_RST_SW=3,ESP_RST_DEEPSLEEP=5;
+inline constexpr int ESP_RST_POWERON=1,ESP_RST_SW=3,ESP_RST_DEEPSLEEP=8;
 inline int resetReason=ESP_RST_POWERON;
 inline int esp_reset_reason(){return resetReason;}
 '''

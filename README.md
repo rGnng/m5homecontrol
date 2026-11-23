@@ -213,8 +213,8 @@ keypad key release. Web and OTA are unavailable while asleep.
   change the CPU idle policy.
 - Entering dim/off disconnects the HA WebSocket, stops HA reconnects, heartbeats,
   subscriptions and REST reads, and cancels queued commands and entity-list
-  downloads. An HTTP request already running may finish, but its result is
-  discarded even if the display wakes before it returns.
+  downloads. An active HTTP response is cancelled; a connection already starting
+  may finish, but its result is discarded even if the display wakes first.
 - Values in all configured menu rows and AC detail controls become `--`, with
   names retained. The dim screen is painted once and stays static. Entering off
   directly also clears displayed values before the LCD sleeps.
@@ -240,6 +240,11 @@ keypad key release. Web and OTA are unavailable while asleep.
   wakes. If the keypad is missing or
   its IRQ is faulty, Off falls back to light sleep. Other board models retain
   the LCD-only Off behavior.
+- Wake-pin level interrupts are cleared after light sleep and before startup
+  initializes the display and keypad. The keypad's falling-edge IRQ is restored
+  separately, preventing stale wake triggers from becoming active CPU interrupts.
+  A confirmed empty keypad buffer clears wake-key suppression even if its IRQ
+  stays low; failed I²C reads do not clear it.
 - The speaker task and DAC stop one second after a sound finishes. GPIO25 is
   driven low on Core Basic. This quiets the signal path; the board does not
   provide a separate amplifier shutdown control.
@@ -522,6 +527,7 @@ working memory. Capturing does not wake the display or change pages.
 | `GET /power?format=icon` | Battery icon; an unavailable reading shows `?` |
 | `GET /dock` | Physical dock state as JSON; no charger read or display wake |
 | `GET /diag` | Menu, backlight, LED, and power diagnostics; reading it does not wake the display |
+| `GET /diag/crash` | Saved crash summary and backtrace; requires the firmware username/password |
 | `GET /screenshot.bmp` | Stream the current display as `ha-remote-screen.bmp`; does not redraw or wake the display |
 | `GET /update` | Firmware upload form; requires the firmware username/password |
 | `POST /update?size=<bytes>` | Authenticated firmware upload using multipart field `firmware` |
@@ -530,6 +536,8 @@ Backlight diagnostics include `backlight=normal|dim|off`, `backlight_pwm` (0–2
 `dim_theme` (0/1), and `display_override` (-1 for automatic, 1 for Dim preview,
 2 for manual Off). Dim follows the active saved Off timeout. Sleep diagnostics
 are retained across light sleep and available after waking.
+`reset_reason` uses ESP-IDF values: `5` is an interrupt-watchdog reset;
+`8` is a deep-sleep wake.
 Clock diagnostics include `time_source=ha|unavailable`, `ha_timezone`,
 `utc_offset` (seconds east of UTC), `local_time`, and `ha_clock_age` (seconds
 since the last valid sample). Reading diagnostics does not count as activity.
@@ -551,6 +559,13 @@ Further commands for an entity already queued or running are ignored until it
 completes, so repeated presses cannot calculate changes from stale values.
 Commands are reconciled through a delayed state read even after an HTTP error,
 since HA may have acted before the response failed.
+
+WebSocket TCP/TLS connection work also runs on a worker; callbacks and state
+changes stay on the main loop. HTTP response reads have total time and byte
+limits, including silent or trickling peers. Web requests abort on a stalled
+header/upload; incomplete firmware uploads release their power guard. Screenshot
+streaming and LED transmission have finite waits and restore their resources on
+failure.
 
 `ha_command_failures`, `ha_last_command_status`, and `ha_last_command_ms` report
 service errors separately. Status is an HTTP code, a negative transport error,
@@ -709,6 +724,8 @@ The full screen redraws at boot and when entering/leaving the dim palette.
   HA administrator token, as does the existing clock template subscription
 - Entity-list JSON downloads have a 15-second total read deadline; a stalled or
   trickling HA server cannot hold web configuration indefinitely
+- State/service responses allow 5 seconds (10 with TLS) and 64 KiB;
+  entity-list transfers allow 20 seconds overall and 4 MiB
 
 ## Build and flash
 
@@ -729,6 +746,11 @@ pio run
 pio run -t upload --upload-port "<serial-port>"
 pio device monitor -p "<serial-port>" -b 115200
 ```
+
+The build generates a bounded WebServer library under `.pio/guarded-libs` from
+the installed Arduino sources. Shared PlatformIO packages remain untouched;
+an unsupported parser version fails the build instead of silently skipping the
+read deadlines.
 
 After the first USB flash, update over Wi-Fi through the web firmware page.
 The configured hostname (`ha-remote` by default) is applied before Wi-Fi starts,
@@ -769,6 +791,10 @@ src/main.cpp          menu UI, partial refresh, input
 src/app_config.cpp    NVS, network, web server, serial console
 src/ha_client.cpp     REST + WebSocket client
 src/power_status.cpp  shared power sampling, PMIC recovery, battery handoff
+include/async_websocket.h  background TCP/TLS connection setup
+include/transfer_budget.h  cancellable transport time/byte limits
+include/network_io.h  bounded socket writes
+tools/prepare_webserver.py  project-local request-parser deadlines
 include/app_config.h
 include/backlight_schedule.h
 include/keypad_controls.h  physical keypad remap
@@ -800,6 +826,12 @@ g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
 /tmp/m5-ha-clock-test
 python3 tools/test_ha_clock_ws.py
 python3 tools/test_ha_http_worker.py
+python3 tools/test_async_websocket.py
+python3 tools/test_transfer_budget.py
+python3 tools/test_network_io.py
+python3 tools/test_web_server_deadlines.py
+python3 tools/test_screenshot_stream.py
+python3 tools/test_side_led_bus.py
 python3 tools/test_web_config.py
 python3 tools/test_network_hostname.py
 python3 tools/test_connected_power.py

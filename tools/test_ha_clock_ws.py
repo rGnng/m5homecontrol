@@ -31,7 +31,7 @@ static std::vector<std::string> sent;
 static void pollHttpWork(){}
 static bool g_dataSuspended=false,g_wsResumePending=false;
 static uint32_t g_dataGeneration=0,g_discardedHttp=0;
-struct {int loops=0;void loop(){++loops;} void disconnect(){} void setReconnectInterval(int){} } ws;
+struct {int loops=0;void loop(){++loops;} void disconnect(){} void setReconnectInterval(int){} void pollConnect(){} } ws;
 enum WStype_t {WStype_CONNECTED,WStype_DISCONNECTED,WStype_TEXT,WStype_ERROR};
 static constexpr int WL_CONNECTED=3;
 struct {int status(){return WL_CONNECTED;}} WiFi;
