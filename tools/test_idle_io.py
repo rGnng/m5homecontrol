@@ -46,6 +46,8 @@ namespace m5 {enum class board_t {board_M5Stack,other};}
 static m5::board_t board=m5::board_t::board_M5Stack;
 static uint8_t rawKey=0;
 static bool busOk=true,present=true,releaseOnRead=true,interruptInRead=false;
+static bool deepBoot=false;
+bool deepSleepBoot(){return deepBoot;}
 static int busReads=0;
 struct Bus {
     bool scanID(uint8_t address,int hz){assert(address==0x08 && hz==100000);return present;}
@@ -80,6 +82,7 @@ static void resetKeypad(){
     busOk=present=releaseOnRead=true;interruptInRead=false;rawKey=0;
     board=m5::board_t::board_M5Stack;
     g_keypadIrqAvailable=g_keypadIrqVerified=g_keypadIrqFault=g_keypadIrqPending=false;
+    g_keypadDiscardWakeKey=deepBoot=false;
     g_keypadReadCount=g_keypadIrqReads=g_keypadIrqFaults=0;
     g_lastKeyPoll=g_lastKeyTime=0;g_lastKey=0;
 }
@@ -134,6 +137,15 @@ int main(){
     now=20;key('7',false);assert(keypadPoll()=='1');
     resetKeypad();present=false;keypadInit();assert(!interruptHandler && pinModes==0);
     assert(keypadStatus().find("keypad_irq_pin=-1")!=String::npos);
+    // Deep wake consumes a valid action key before input dispatch, including failed boot I2C.
+    resetKeypad();deepBoot=true;key('7');restoreKeypadAfterDeepSleep();keypadInit();
+    now=20;assert(!keypadPoll() && !g_keypadDiscardWakeKey && !rawKey);
+    now=40;key('9');assert(keypadPoll()=='3');
+    resetKeypad();deepBoot=true;key('7');busOk=false;
+    restoreKeypadAfterDeepSleep();assert(g_keypadDiscardWakeKey);keypadInit();
+    now=20;assert(!keypadPoll() && g_keypadDiscardWakeKey);
+    busOk=true;now=120;assert(!keypadPoll() && !g_keypadDiscardWakeKey && !rawKey);
+    now=140;key('9');assert(keypadPoll()=='3');
     std::puts("PASS: actual keypad IRQ verification, reduced reads, prompt keys, legacy/missing/stuck wiring, I2C failures, ISR races, debounce and rollover");
 
     resetSchedule();scheduleTick();assert(timeConversions==1 && applies==1 && g_backlightPercent==20);

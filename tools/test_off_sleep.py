@@ -13,7 +13,7 @@ arduino += r'''
 inline uint32_t now=10000;
 inline uint32_t millis(){return now;}
 inline void delay(unsigned ms){now+=ms;}
-struct SerialStub{void flush(){}};
+struct SerialStub{void flush(){}void println(const char*){}};
 inline SerialStub Serial;
 '''
 gpio = r'''
@@ -79,6 +79,8 @@ int main(){
 '''
 integration_prefix = r'''
 #include "backlight_schedule.h"
+#include "app_config.h"
+#include "deep_sleep.h"
 #include "off_sleep.h"
 #include <cassert>
 #include <atomic>
@@ -88,6 +90,10 @@ struct{m5::board_t board=m5::board_t::board_M5Stack;m5::board_t getBoard(){retur
 static BacklightPhase g_backlightPhase=BacklightPhase::Off;
 static uint32_t g_offStartedAt=0,g_lastKeyPoll=0;
 static bool busy=false,work=false,g_audioQuiet=true,net=false,netOk=true;
+static int deepCalls=0;
+bool enterDeepSleep(){++deepCalls;return false;}
+AppConfig g_config;
+static bool g_scheduleNight=false;
 static std::atomic<bool> g_commandLedActive{false};
 static bool g_keypadIrqAvailable=true,g_keypadIrqVerified=false,g_keypadIrqFault=false;
 static constexpr int KEYPAD_IRQ_PIN=35,KEYPAD_IRQ_HEALTH_MS=1000,FALLING=2,LOW=0;
@@ -97,7 +103,7 @@ static uint32_t sleepMs=0;
 static OffWake result=OffWake::Timer;
 static bool haHttpBusy(){return busy;}
 static bool connectedPowerWorkActive(){return work;}
-static bool networkSetSuspended(bool value){if(!netOk)return false;net=value;return true;}
+bool networkSetSuspended(bool value){if(!netOk)return false;net=value;return true;}
 static int digitalRead(int pin){return pin==pressedPin?LOW:1;}
 static int digitalPinToInterrupt(int pin){return pin;}
 static void keypadInterrupt(){}
@@ -131,6 +137,18 @@ int main(){
     g_backlightPhase=BacklightPhase::Off;g_keypadIrqFault=true;result=OffWake::Timer;offSleepTick();
     g_keypadIrqAvailable=false;offSleepTick();assert(detaches==attaches && sleepCalls==8);
     M5.board=m5::board_t::other;offSleepTick();assert(sleepCalls==8);
+    // Each saved period selects Deep independently, without timer wake.
+    M5.board=m5::board_t::board_M5Stack;g_keypadIrqAvailable=true;
+    g_keypadIrqFault=false;g_config.daySleepMode=SleepMode::Deep;
+    g_backlightPhase=BacklightPhase::Off;offSleepTick();
+    assert(deepCalls==1 && !net);
+    g_scheduleNight=true;g_backlightPhase=BacklightPhase::Off;offSleepTick();
+    assert(deepCalls==1 && sleepCalls==9 && net); // Night remains Light.
+    g_config.nightSleepMode=SleepMode::Deep;offSleepTick();
+    assert(deepCalls==2 && !net);
+    // Missing/faulty keypad cannot leave the device stuck in scheduled deep sleep.
+    g_backlightPhase=BacklightPhase::Off;g_keypadIrqAvailable=false;offSleepTick();
+    assert(deepCalls==2 && sleepCalls==10 && net);
     std::puts("PASS: actual Off orchestration, transfer/audio/LED guards, radio stop, timer-only suspension, fallback polling and wake-only input");
 }
 '''

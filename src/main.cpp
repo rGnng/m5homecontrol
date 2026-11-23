@@ -17,6 +17,7 @@
 #include "app_config.h"
 #include "connected_power.h"
 #include "off_sleep.h"
+#include "deep_sleep.h"
 #include "backlight_schedule.h"
 #include "power_status.h"
 #include "side_led_bus.h"
@@ -213,6 +214,7 @@ static constexpr uint32_t KEYPAD_IRQ_HEALTH_MS = 1000;
 static bool g_keypadIrqAvailable = false, g_keypadIrqVerified = false;
 static bool g_keypadIrqFault = false;
 static volatile bool g_keypadIrqPending = false;
+static bool g_keypadDiscardWakeKey = false;
 static uint32_t g_keypadReadCount = 0, g_keypadIrqReads = 0, g_keypadIrqFaults = 0;
 static uint32_t g_lastKeyPoll = 0;
 static uint32_t g_lastKeyTime = 0;
@@ -258,6 +260,15 @@ static uint8_t keypadReadByte() {
     return readOk && stopOk ? value : 0;
 }
 
+static void restoreKeypadAfterDeepSleep() {
+    if (!deepSleepBoot()) return;
+    pinMode(KEYPAD_IRQ_PIN, INPUT);
+    keypadReadByte();
+    // If I2C failed, keep discarding until the latched wake key is released.
+    // A retried read of the wake key must not run its normal action.
+    g_keypadDiscardWakeKey = digitalRead(KEYPAD_IRQ_PIN) == LOW;
+}
+
 static char keypadPoll() {
     uint32_t now = millis();
     bool irqLow = g_keypadIrqAvailable && digitalRead(KEYPAD_IRQ_PIN) == LOW;
@@ -285,6 +296,10 @@ static char keypadPoll() {
         g_keypadIrqVerified = false;
         g_keypadIrqFault = !irqReleased;
         ++g_keypadIrqFaults;
+    }
+    if (g_keypadDiscardWakeKey) {
+        if (irqReleased) g_keypadDiscardWakeKey = false;
+        return 0;
     }
     if (!c) return 0;
 
@@ -683,6 +698,9 @@ String backlightStatus() {
            " power_sample_interval_ms=" + String(powerSampleIntervalMs()) +
            " network_suspended=" + String(networkSuspended() ? 1 : 0) +
            " " + offSleepStatus() +
+           " " + deepSleepStatus() +
+           " off_sleep_mode=" + String((g_scheduleNight ? g_config.nightSleepMode : g_config.daySleepMode)
+                                         == SleepMode::Deep ? "deep" : "light") +
            " " + keypadStatus();
 }
 
@@ -2285,6 +2303,9 @@ void setup() {
     M5.begin(cfg);
     M5.Speaker.setVolume(96);
     quietAudio();
+    // Calculator3 latches the wake key until read. Consume it before normal
+    // polling so the wake key cannot run an entity action after boot.
+    restoreKeypadAfterDeepSleep();
     keypadInit();
     initCommandLeds();
 
@@ -2351,6 +2372,18 @@ static void offSleepTick() {
 
     bool keypadWake = g_keypadIrqAvailable && !g_keypadIrqFault;
     if (g_keypadIrqAvailable) detachInterrupt(digitalPinToInterrupt(KEYPAD_IRQ_PIN));
+    bool scheduledDeep = (g_scheduleNight ? g_config.nightSleepMode : g_config.daySleepMode) == SleepMode::Deep;
+    if (scheduledDeep && keypadWake) {
+        enterDeepSleep();
+        // Successful deep sleep never returns. Restore the UI on a failed or
+        // cancelled entry, including a key arriving just before sleep.
+        if (g_keypadIrqAvailable)
+            attachInterrupt(digitalPinToInterrupt(KEYPAD_IRQ_PIN), keypadInterrupt, FALLING);
+        g_lastKeyPoll = millis() - KEYPAD_IRQ_HEALTH_MS;
+        keypadPoll();
+        noteActivity();
+        return;
+    }
     OffWake wake = sleepWhileOff(keypadWake, g_keypadIrqVerified ? 60000 : 1000);
     if (g_keypadIrqAvailable)
         attachInterrupt(digitalPinToInterrupt(KEYPAD_IRQ_PIN), keypadInterrupt, FALLING);

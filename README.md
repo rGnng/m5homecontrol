@@ -167,8 +167,9 @@ so actual dock charging detection requires a hardware status connection.
 In normal display mode, the remote accepts live HA updates. Dim and off suspend
 HA data, show `--` for entity values, and freeze the status bar. Dim keeps Wi-Fi
 associated so web configuration, screenshots and OTA remain reachable. On Core
-Basic, Off stops Wi-Fi and enters ESP32 light sleep; a keypad or Core A/B/C key
-wakes the display and reconnects. Web and OTA are unavailable while asleep.
+Basic, Off stops Wi-Fi and uses the active day/night sleep-mode setting. Light
+sleep resumes on a keypad or Core A/B/C key; deep sleep boots the remote on a
+keypad key release. Web and OTA are unavailable while asleep.
 The inferred dock hint does not change this policy.
 
 - Normal display mode disables Wi-Fi modem sleep, keeping the receiver awake
@@ -199,11 +200,13 @@ The inferred dock hint does not change this policy.
   HA results then fill in the values.
   Off waits for HTTP work, firmware uploads, sounds and LED animations to finish
   before stopping the network and sleeping. GPIO35 (keypad) and GPIO39/38/37
-  (Core A/B/C) wake the CPU. With an unverified/faulty keypad IRQ, one-second
+  (Core A/B/C) wake the CPU in light sleep. With an unverified/faulty keypad IRQ, one-second
   timer wakes poll for keys; with a verified IRQ, health wakes run every minute.
   Timer wakes leave the screen and Wi-Fi off. A keypad wake can take up to one
   second with the polling fallback. Sleep setup failures retain input polling.
-  Other board models retain the LCD-only Off behavior.
+  Deep sleep uses GPIO35/EXT0, with no timer wakes. If the keypad is missing or
+  its IRQ is faulty, Off falls back to light sleep. Other board models retain
+  the LCD-only Off behavior.
 - The speaker task and DAC stop one second after a sound finishes. GPIO25 is
   driven low on Core Basic. This quiets the signal path; the board does not
   provide a separate amplifier shutdown control.
@@ -254,6 +257,14 @@ Configure **Display** in the web page. Schedule times follow
 The night defaults turn the display off after 12 minutes without input. The form
 uses seconds: 600 before dim and another 120 before off. Set a timeout to `0` to
 disable it. If dimming is disabled, the off timeout counts from the last input.
+
+Each day/night period has an **Off sleep mode** selection in web configuration:
+**Light sleep** resumes the current view; **Deep sleep** stays asleep until a
+keypad key is released, then boots into the main menu and reconnects Wi-Fi/HA.
+Core A/B/C wake light sleep only. The wake press performs no entity action.
+The active period's selection applies to scheduled Off, R5C1 Off and web Off.
+Existing configurations default to Light sleep; saved timeouts are preserved.
+Select Deep sleep for the desired period and use **Save and reboot** to apply it.
 
 | Display state | Appearance | First device key press |
 | --- | --- | --- |
@@ -467,6 +478,17 @@ There are eight menu slots, so 9 has no assigned slot. The physical bottom-left
 the device to sleep immediately; pressing it in Off only wakes the device.
 Serial `.` still opens AC detail when awake.
 
+### Deep-sleep diagnostics
+
+After waking, `/diag` reports `deep_sleep_entries`, `deep_sleep_keypad_wakes`,
+`deep_sleep_timer_wakes`, `deep_sleep_errors`, and `deep_sleep_last_wake`
+(`none`, `keypad`, `timer`, or `other`). Counters survive deep sleep in RTC
+memory and reset on other kinds of boot. `off_sleep_mode` shows the active
+period's saved selection. Deep sleep has no periodic timer or test-key shortcut;
+R5C3 has no assigned action. If setup fails or a new key arrives before entry,
+the UI and network recover. Boot consumes the wake byte before normal input,
+including retries after a failed I2C read.
+
 ### Adjusting values
 
 - Main-menu AC: `+`/`-` changes target temperature by HA's `target_temp_step`,
@@ -643,4 +665,6 @@ python3 tools/test_network_hostname.py
 python3 tools/test_connected_power.py
 python3 tools/test_idle_io.py
 python3 tools/test_off_sleep.py
+python3 tools/test_deep_sleep.py
+python3 tools/test_sleep_config.py
 ```

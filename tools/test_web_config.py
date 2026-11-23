@@ -98,6 +98,8 @@ int main(){
     }
     for(int pages: {1,3,MAX_PAGES}){
         server=WebServer{};serviced=0;g_config.pageCount=pages;g_config.entityCount=pages*GRID_SLOTS;
+        g_config.daySleepMode=pages==3?SleepMode::Light:SleepMode::Deep;
+        g_config.nightSleepMode=pages==3?SleepMode::Deep:SleepMode::Light;
         handleRoot();
         if(optionsComplete){
             auto complete=std::move(optionsComplete);optionsComplete=nullptr;
@@ -111,6 +113,13 @@ int main(){
         assert(html.find("function movePage(")!=std::string::npos);
         assert(html.find("function openConnection(")!=std::string::npos);
         assert(html.find("new FormData(form)")!=std::string::npos);
+        for(const char* period:{"d","n"}){
+            const bool deep=String(period)=="d"?g_config.daySleepMode==SleepMode::Deep:g_config.nightSleepMode==SleepMode::Deep;
+            auto select=html.find(std::string("name=\"")+period+"sleep\">");
+            assert(select!=std::string::npos);
+            auto choices=html.substr(select,html.find("</select>",select)-select);
+            assert(choices.find(deep?"value=\"deep\" selected":"value=\"light\" selected")!=std::string::npos);
+        }
         assert(html.find("</body></html>")!=std::string::npos);
         assert(html.find("Room &amp; lights")!=std::string::npos && html.find("AC &lt;room&gt;")!=std::string::npos);
         const std::string lastField="name=\"e"+std::to_string(pages*GRID_SLOTS-1)+"\"";

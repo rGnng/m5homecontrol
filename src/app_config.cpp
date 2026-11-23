@@ -65,6 +65,12 @@ static void normalizeAuxEntities() {
     }
 }
 
+static SleepMode parseSleepMode(const String& value, SleepMode fallback) {
+    if (value == "deep") return SleepMode::Deep;
+    if (value == "light") return SleepMode::Light;
+    return fallback;
+}
+
 void configLoad() {
     Preferences p;
     p.begin(NVS_NAMESPACE, true);
@@ -125,6 +131,7 @@ void configLoad() {
     g_config.dayDimBrightness = constrain(p.getInt("ddb", 1), 1, 100);
     g_config.dayDimSeconds = constrain(p.getInt("dd", 0), 0, 3600);
     g_config.dayOffSeconds = constrain(p.getInt("do", 0), 0, 3600);
+    g_config.daySleepMode = p.getInt("dsm", 0) == 1 ? SleepMode::Deep : SleepMode::Light;
 
     g_config.nightStart = constrain(p.getInt("ns", 21 * 60), 0, 1439);
     g_config.nightEnd = constrain(p.getInt("ne", 7 * 60), 0, 1439);
@@ -136,6 +143,7 @@ void configLoad() {
     int legacyOff = constrain(p.getInt("no", 0), 0, 3600);
     g_config.nightDimSeconds = constrain(p.getInt("nd", legacyOff ? 0 : 600), 0, 3600);
     g_config.nightOffSeconds = hasDimSchedule ? legacyOff : (legacyOff ? legacyOff : 120);
+    g_config.nightSleepMode = p.getInt("nsm", 0) == 1 ? SleepMode::Deep : SleepMode::Light;
     p.end();
     normalizeAuxEntities();
 }
@@ -197,12 +205,14 @@ bool configSave() {
     putIntKey("ddb", g_config.dayDimBrightness);
     putIntKey("dd", g_config.dayDimSeconds);
     putIntKey("do", g_config.dayOffSeconds);
+    putIntKey("dsm", static_cast<int>(g_config.daySleepMode));
     putIntKey("ns", g_config.nightStart);
     putIntKey("ne", g_config.nightEnd);
     putIntKey("nb", g_config.nightBrightness);
     putIntKey("ndb", g_config.nightDimBrightness);
     putIntKey("nd", g_config.nightDimSeconds);
     putIntKey("no", g_config.nightOffSeconds);
+    putIntKey("nsm", static_cast<int>(g_config.nightSleepMode));
     p.end();
     return ok;
 }
@@ -293,7 +303,8 @@ static String htmlHeader(const String& title) {
     h += ".schedule-line{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:8px}";
     h += ".schedule-times{grid-template-columns:repeat(2,minmax(0,1fr))}";
     h += ".schedule-line label{min-width:0;margin:0;font-size:12px;display:flex;flex-direction:column;justify-content:flex-end}";
-    h += ".schedule-line input{min-width:0;margin-top:5px;padding:7px 5px}";
+    h += ".schedule-line input,.schedule-line select{min-width:0;margin-top:5px;padding:7px 5px}";
+    h += ".schedule-sleep{grid-column:1/-1}";
     h += "label.inline{display:inline-flex;align-items:center;gap:4px;margin:0 10px 0 0;font-size:12px;color:#aaa}";
     h += "label.inline input{width:auto;height:auto;margin:0}";
     h += ".pagehead{font-weight:600;margin:18px 0 6px;color:#fff}";
@@ -440,9 +451,10 @@ static void handleRoot() {
     page += "</select>";
     page += "<label>Fallback brightness (%)</label><input name=\"bright\" type=\"number\" min=\"1\" max=\"100\" value=\"" +
             String(g_config.brightness) + "\">";
-    page += "<div class=\"pagehead\">Backlight Schedule</div>";
+    page += "<div class=\"pagehead\">Display &amp; Sleep Schedule</div>";
     auto scheduleRow = [&](const char* label, const char* prefix, uint16_t start, uint16_t end,
-                           uint8_t brightness, uint8_t dimBrightness, uint16_t dim, uint16_t off) {
+                           uint8_t brightness, uint8_t dimBrightness, uint16_t dim, uint16_t off,
+                           SleepMode sleepMode) {
         page += "<div class=\"schedule-period\"><div class=\"schedule-title\">" + String(label) + "</div>";
         page += "<div class=\"schedule-line schedule-times\">";
         page += "<label>Start<input name=\"" + String(prefix) + "start\" type=\"time\" value=\"" + formatTime(start) + "\"></label>";
@@ -456,15 +468,23 @@ static void handleRoot() {
         number("Dim %", "dimbright", dimBrightness, 1, 100);
         number("Dim after (s)", "dim", dim, 0, 3600);
         number("Off after dim (s)", "off", off, 0, 3600);
+        page += "<label class=\"schedule-sleep\">Off sleep mode<select name=\"" + String(prefix) + "sleep\">";
+        page += "<option value=\"light\"" + String(sleepMode == SleepMode::Light ? " selected" : "") + ">Light sleep</option>";
+        page += "<option value=\"deep\"" + String(sleepMode == SleepMode::Deep ? " selected" : "") + ">Deep sleep</option>";
+        page += "</select></label>";
         page += "</div></div>";
     };
     scheduleRow("Day", "d", g_config.dayStart, g_config.dayEnd, g_config.dayBrightness,
-                g_config.dayDimBrightness, g_config.dayDimSeconds, g_config.dayOffSeconds);
+                g_config.dayDimBrightness, g_config.dayDimSeconds, g_config.dayOffSeconds, g_config.daySleepMode);
     scheduleRow("Night", "n", g_config.nightStart, g_config.nightEnd, g_config.nightBrightness,
-                g_config.nightDimBrightness, g_config.nightDimSeconds, g_config.nightOffSeconds);
+                g_config.nightDimBrightness, g_config.nightDimSeconds, g_config.nightOffSeconds, g_config.nightSleepMode);
     page += "<p>0 = disabled. Without dimming, Off counts from last input.</p>";
+    page += "<p>Off uses the active day/night sleep mode, including R5C1 and web Off. "
+            "Light sleep resumes the current view; keypad or Core A/B/C wakes it. "
+            "Deep sleep stays asleep until a keypad key is released, then restarts the remote. "
+            "Wi-Fi and web access stop in both modes.</p>";
     page += "<div class=\"pagehead\">Preview display</div>";
-    page += "<p>Dim follows the saved day/night Off timeout. Off sleeps with Wi-Fi off; press a device key to wake.</p>";
+    page += "<p>Dim follows the saved day/night Off timeout. Off follows the saved sleep mode; use the keypad to wake.</p>";
     page += "<div class=\"actions display-preview\" role=\"group\" aria-label=\"Display preview\">"
             "<button type=\"button\" data-display-mode=\"wake\" aria-pressed=\"false\" onclick=\"previewDisplay('wake')\">Wake</button>"
             "<button type=\"button\" data-display-mode=\"dim\" aria-pressed=\"false\" onclick=\"previewDisplay('dim')\">Dim</button>"
@@ -860,6 +880,7 @@ static void handleSave() {
     if (server.hasArg("ddimbright")) g_config.dayDimBrightness = constrain(server.arg("ddimbright").toInt(), 1, 100);
     if (server.hasArg("ddim")) g_config.dayDimSeconds = constrain(server.arg("ddim").toInt(), 0, 3600);
     g_config.dayOffSeconds = constrain(server.arg("doff").toInt(), 0, 3600);
+    g_config.daySleepMode = parseSleepMode(server.arg("dsleep"), g_config.daySleepMode);
 
     g_config.nightStart = parseTime(server.arg("nstart"), g_config.nightStart);
     g_config.nightEnd = parseTime(server.arg("nend"), g_config.nightEnd);
@@ -867,6 +888,7 @@ static void handleSave() {
     if (server.hasArg("ndimbright")) g_config.nightDimBrightness = constrain(server.arg("ndimbright").toInt(), 1, 100);
     if (server.hasArg("ndim")) g_config.nightDimSeconds = constrain(server.arg("ndim").toInt(), 0, 3600);
     g_config.nightOffSeconds = constrain(server.arg("noff").toInt(), 0, 3600);
+    g_config.nightSleepMode = parseSleepMode(server.arg("nsleep"), g_config.nightSleepMode);
 
     int pages = server.arg("pagecount").toInt();
     pages = constrain(pages, 1, MAX_PAGES);

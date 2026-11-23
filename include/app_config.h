@@ -15,6 +15,8 @@ static constexpr uint8_t CLIMATE_DRY  = 1u << 2;
 static constexpr uint8_t CLIMATE_FAN  = 1u << 3;
 static constexpr uint8_t CLIMATE_AUTO = 1u << 4;
 
+enum class SleepMode : uint8_t { Light, Deep };
+
 struct AppConfig {
     String ssid;
     String pass;
@@ -38,6 +40,7 @@ struct AppConfig {
     uint8_t dayDimBrightness = 1;
     uint16_t dayDimSeconds = 0;
     uint16_t dayOffSeconds = 0;
+    SleepMode daySleepMode = SleepMode::Light;
 
     uint16_t nightStart = 21 * 60;
     uint16_t nightEnd = 7 * 60;
@@ -45,6 +48,7 @@ struct AppConfig {
     uint8_t nightDimBrightness = 1;
     uint16_t nightDimSeconds = 600;
     uint16_t nightOffSeconds = 120;
+    SleepMode nightSleepMode = SleepMode::Light;
 };
 
 extern AppConfig g_config;
