@@ -36,6 +36,7 @@ void setConnectedPowerIdle(bool idle) {
 }
 
 bool connectedPowerIdle() { return g_connectedIdle; }
+bool connectedPowerWorkActive() { return g_powerWork != 0; }
 
 void setConnectedPowerSuspended(bool suspended) {
     g_connectedSuspended = suspended;

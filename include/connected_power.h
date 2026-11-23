@@ -8,6 +8,7 @@ bool connectedPowerIdle();
 void setConnectedPowerSuspended(bool suspended);
 void beginConnectedPowerWork();
 void endConnectedPowerWork();
+bool connectedPowerWorkActive();
 String connectedPowerStatus();
 
 class ConnectedPowerWork {

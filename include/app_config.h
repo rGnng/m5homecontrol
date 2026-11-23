@@ -56,6 +56,8 @@ bool haConfigured();
 
 void networkBegin();
 void networkLoop();
+bool networkSetSuspended(bool suspended);
+bool networkSuspended();
 bool configModeActive();
 String networkIp();
 String commandLedsStatus();

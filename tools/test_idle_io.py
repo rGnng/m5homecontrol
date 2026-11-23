@@ -34,6 +34,7 @@ static bool idle=false;
 static bool connectedPowerIdle(){return idle;}
 static void setConnectedPowerIdle(bool value){idle=value;}
 static void setPowerPollingIdle(bool){}
+bool networkSetSuspended(bool){return true;}
 static constexpr int LOW=0,HIGH=1,INPUT=0,FALLING=2;
 static int irqPin=HIGH,pinModes=0;
 static void (*interruptHandler)()=nullptr;
@@ -90,6 +91,7 @@ static void resetSchedule(uint32_t base=0){
     clockAvailable=true;clockHour=12;clockMinute=0;timeConversions=applies=0;
     g_scheduleStarted=g_scheduleObservedClock=g_scheduleClockReady=g_scheduleNight=false;
     g_scheduleClockCheckedAt=g_nextBacklightCheck=g_backlightChecks=g_backlightClockChecks=0;
+    g_dimStartedAt=g_offStartedAt=0;
 }
 int main(){
     resetKeypad();keypadInit();assert(pinModes==1 && interruptHandler && !g_keypadIrqVerified);
@@ -176,6 +178,32 @@ int main(){
     resetSchedule(UINT32_MAX-1000);scheduleTick();now=UINT32_MAX-1;scheduleTick();assert(applies==1);
     now=UINT32_MAX;scheduleTick();assert(applies==2 && timeConversions==2);
     now=0;scheduleTick();assert(applies==2);
+    // Manual Dim uses the active period's Off-after-dim setting from entry,
+    // not last activity or the normal-to-dim timeout. Repeated previews don't reset it.
+    resetSchedule(100000);g_config.dayDimSeconds=300;g_config.dayOffSeconds=3;
+    setDisplayMode("dim");assert(g_backlightPhase==BacklightPhase::Dim && g_dimStartedAt==100000);
+    now=101234;setDisplayMode("dim");assert(g_dimStartedAt==100000);
+    assert(g_nextBacklightCheck==102234);
+    now=102999;scheduleTick();assert(g_backlightPhase==BacklightPhase::Dim);
+    assert(g_nextBacklightCheck==103000);
+    now=103000;scheduleTick();assert(g_backlightPhase==BacklightPhase::Off && g_offStartedAt==103000);
+    now=104000;noteActivity();assert(g_backlightPhase==BacklightPhase::Normal);
+    // Day zero keeps Dim; a day/night change uses the saved night timeout.
+    resetSchedule();g_config.dayOffSeconds=0;g_config.nightOffSeconds=3;
+    setDisplayMode("dim");now=3600000;scheduleTick();assert(g_backlightPhase==BacklightPhase::Dim);
+    clockHour=21;now+=1000;scheduleTick();assert(g_backlightPhase==BacklightPhase::Off);
+    resetSchedule();clockHour=23;g_config.nightOffSeconds=3;setDisplayMode("dim");
+    now=2999;scheduleTick();assert(g_backlightPhase==BacklightPhase::Dim);
+    now=3000;scheduleTick();assert(g_backlightPhase==BacklightPhase::Off);
+    // Manual Off remains available when automatic Off is disabled.
+    resetSchedule();setDisplayMode("dim");setDisplayMode("off");assert(g_backlightPhase==BacklightPhase::Off);
+    // Timed Dim survives millis wrap and waits for the first HA clock.
+    resetSchedule(UINT32_MAX-1000);g_config.dayOffSeconds=2;setDisplayMode("dim");
+    now=998;scheduleTick();assert(g_backlightPhase==BacklightPhase::Dim);
+    now=999;scheduleTick();assert(g_backlightPhase==BacklightPhase::Off);
+    resetSchedule();clockAvailable=false;g_config.dayOffSeconds=2;setDisplayMode("dim");
+    now=10000;scheduleTick();assert(g_backlightPhase==BacklightPhase::Dim);
+    clockAvailable=true;scheduleTick();assert(g_backlightPhase==BacklightPhase::Off);
     std::puts("PASS: actual second clock cache, skipped background work, exact idle deadlines, immediate input/web wake, first time sync, day/night, disabled timers and rollover");
 }
 '''

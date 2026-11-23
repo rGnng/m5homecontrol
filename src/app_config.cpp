@@ -30,6 +30,7 @@ static bool g_serverStarted = false;
 static bool g_staEverConnected = false;
 static bool g_wifiWasConnected = false;
 static bool g_mdnsStarted = false;
+static bool g_networkSuspended = false;
 static uint32_t g_connectStart = 0;
 static uint32_t g_lastReconnect = 0;
 
@@ -463,6 +464,7 @@ static void handleRoot() {
                 g_config.nightDimBrightness, g_config.nightDimSeconds, g_config.nightOffSeconds);
     page += "<p>0 = disabled. Without dimming, Off counts from last input.</p>";
     page += "<div class=\"pagehead\">Preview display</div>";
+    page += "<p>Dim follows the saved day/night Off timeout. Off sleeps with Wi-Fi off; press a device key to wake.</p>";
     page += "<div class=\"actions display-preview\" role=\"group\" aria-label=\"Display preview\">"
             "<button type=\"button\" data-display-mode=\"wake\" aria-pressed=\"false\" onclick=\"previewDisplay('wake')\">Wake</button>"
             "<button type=\"button\" data-display-mode=\"dim\" aria-pressed=\"false\" onclick=\"previewDisplay('dim')\">Dim</button>"
@@ -1295,6 +1297,7 @@ void networkBegin() {
 }
 
 void networkLoop() {
+    if (g_networkSuspended) return;
     if (g_serverStarted) server.handleClient();
 
     if (g_apMode) return;
@@ -1330,6 +1333,29 @@ void networkLoop() {
         WiFi.disconnect();
         WiFi.begin();
     }
+}
+
+bool networkSuspended() { return g_networkSuspended; }
+
+bool networkSetSuspended(bool suspended) {
+    if (g_networkSuspended == suspended) return true;
+    g_networkSuspended = suspended;
+    if (suspended) {
+        if (g_serverStarted) {
+            server.client().stop();
+            server.stop();
+            g_serverStarted = false;
+        }
+        if (g_mdnsStarted) MDNS.end();
+        g_mdnsStarted = g_staEverConnected = g_wifiWasConnected = false;
+        if (WiFi.mode(WIFI_OFF)) return true;
+        // Keep the device recoverable if the driver could not stop the radio.
+        g_networkSuspended = false;
+        networkBegin();
+        return false;
+    }
+    networkBegin();  // Reapply hostname/listen interval and restart web/mDNS on association.
+    return true;
 }
 
 bool configModeActive() {

@@ -16,6 +16,7 @@
 
 #include "app_config.h"
 #include "connected_power.h"
+#include "off_sleep.h"
 #include "backlight_schedule.h"
 #include "power_status.h"
 #include "side_led_bus.h"
@@ -524,6 +525,7 @@ static bool g_scheduleStarted = false, g_scheduleObservedClock = false;
 static bool g_scheduleClockReady = false, g_scheduleNight = false;
 static uint32_t g_scheduleClockCheckedAt = 0, g_nextBacklightCheck = 0;
 static uint32_t g_backlightChecks = 0, g_backlightClockChecks = 0;
+static uint32_t g_dimStartedAt = 0, g_offStartedAt = 0;
 
 static void applyBacklightPercent(int percent) {
     percent = constrain(percent, 0, 100);
@@ -543,6 +545,7 @@ static void scheduleTick(bool explicitInput = false);
 static void noteActivity() {
     setConnectedPowerIdle(false);
     setPowerPollingIdle(false);
+    networkSetSuspended(false);
     g_lastActivity = millis();
     g_backlightOverride = -1;
     scheduleTick(true);
@@ -617,11 +620,19 @@ static void scheduleTick(bool explicitInput) {
     }
     if (g_backlightOverride == (int)BacklightPhase::Dim) {
         plan = {BacklightPhase::Dim, dimBrightness < brightness ? dimBrightness : brightness};
+        uint32_t offSeconds = night ? g_config.nightOffSeconds : g_config.dayOffSeconds;
+        if (clockReady && g_backlightPhase == BacklightPhase::Dim && offSeconds &&
+            now - g_dimStartedAt >= offSeconds * 1000)
+            plan = {BacklightPhase::Off, 0};
     } else if (g_backlightOverride == (int)BacklightPhase::Off) {
         plan = {BacklightPhase::Off, 0};
     }
     if (!explicitInput) {
         plan = limitAutomaticBacklight(plan, {g_backlightPhase, g_backlightPercent});
+    }
+    if (plan.phase != g_backlightPhase) {
+        if (plan.phase == BacklightPhase::Dim) g_dimStartedAt = now;
+        if (plan.phase == BacklightPhase::Off) g_offStartedAt = now;
     }
     applyBacklightPlan(plan);
 
@@ -635,6 +646,12 @@ static void scheduleTick(bool explicitInput) {
         uint32_t offAt = dimAt + offSeconds * 1000;
         if (dimAt && idleMs < dimAt && dimAt - idleMs < delayMs) delayMs = dimAt - idleMs;
         if (offSeconds && idleMs < offAt && offAt - idleMs < delayMs) delayMs = offAt - idleMs;
+    }
+    if (clockReady && g_backlightOverride == (int)BacklightPhase::Dim &&
+        g_backlightPhase == BacklightPhase::Dim) {
+        uint32_t offMs = uint32_t(night ? g_config.nightOffSeconds : g_config.dayOffSeconds) * 1000;
+        uint32_t dimMs = now - g_dimStartedAt;
+        if (offMs && dimMs < offMs && offMs - dimMs < delayMs) delayMs = offMs - dimMs;
     }
     g_nextBacklightCheck = now + delayMs;
 }
@@ -664,6 +681,8 @@ String backlightStatus() {
            " lcd_sleep=" + String(g_lcdSleeping ? 1 : 0) +
            " audio_quiet=" + String(g_audioQuiet ? 1 : 0) +
            " power_sample_interval_ms=" + String(powerSampleIntervalMs()) +
+           " network_suspended=" + String(networkSuspended() ? 1 : 0) +
+           " " + offSleepStatus() +
            " " + keypadStatus();
 }
 
@@ -1904,10 +1923,9 @@ static void directSelect(int idx, bool refreshFirst = false) {
 //  Input
 // ---------------------------------------------------------------------
 static void handleKey(char c) {
-    // R5C1 is idempotent in normal/dim. An off display still consumes the key
-    // as wake-only, like every other keypad key.
+    // R5C1 cycles Normal -> Dim -> Off. The next press is wake-only.
     if (c == KEYPAD_DIM_KEY && g_backlightPhase != BacklightPhase::Off) {
-        setDisplayMode("dim");
+        setDisplayMode(g_backlightPhase == BacklightPhase::Dim ? "off" : "dim");
         return;
     }
     bool wakeOnly = g_backlightPhase == BacklightPhase::Off;
@@ -2323,6 +2341,30 @@ void setup() {
                   haConfigured() ? "configured" : "not configured");
 }
 
+static void offSleepTick() {
+    if (g_backlightPhase != BacklightPhase::Off ||
+        M5.getBoard() != m5::board_t::board_M5Stack) return;
+    // Let the Off response leave the socket and allow active work to drain.
+    if (millis() - g_offStartedAt < 500 || haHttpBusy() || connectedPowerWorkActive() ||
+        g_commandLedActive.load() || !g_audioQuiet) return;
+    if (!networkSetSuspended(true)) return;
+
+    bool keypadWake = g_keypadIrqAvailable && !g_keypadIrqFault;
+    if (g_keypadIrqAvailable) detachInterrupt(digitalPinToInterrupt(KEYPAD_IRQ_PIN));
+    OffWake wake = sleepWhileOff(keypadWake, g_keypadIrqVerified ? 60000 : 1000);
+    if (g_keypadIrqAvailable)
+        attachInterrupt(digitalPinToInterrupt(KEYPAD_IRQ_PIN), keypadInterrupt, FALLING);
+    if (wake != OffWake::Input) return;  // Health wakes keep LCD and Wi-Fi off.
+
+    // Preserve wake-only handling even if M5's button debounce completes later.
+    g_wakeOnlyButtons |= (digitalRead(39) == LOW ? 1 : 0) |
+                         (digitalRead(38) == LOW ? 2 : 0) |
+                         (digitalRead(37) == LOW ? 4 : 0);
+    g_lastKeyPoll = millis() - KEYPAD_IRQ_HEALTH_MS;
+    keypadPoll();  // Consume the wake key and release the keypad's latched IRQ.
+    noteActivity();
+}
+
 void loop() {
     M5.update();
     readPowerStatus();
@@ -2389,5 +2431,6 @@ void loop() {
         }
     }
 
+    offSleepTick();
     delay(connectedPowerIdle() ? 20 : 10);
 }

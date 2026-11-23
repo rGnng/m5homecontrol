@@ -165,18 +165,19 @@ so actual dock charging detection requires a hardware status connection.
 ### Connected power saving
 
 In normal display mode, the remote accepts live HA updates. Dim and off suspend
-HA data, show `--` for entity values, and freeze the status bar. Wi-Fi stays
-associated so web configuration, display previews, screenshots and OTA remain
-reachable. The remote does not enter ESP32 deep sleep or light sleep, and does
-not use the inferred dock hint to change its power policy.
+HA data, show `--` for entity values, and freeze the status bar. Dim keeps Wi-Fi
+associated so web configuration, screenshots and OTA remain reachable. On Core
+Basic, Off stops Wi-Fi and enters ESP32 light sleep; a keypad or Core A/B/C key
+wakes the display and reconnects. Web and OTA are unavailable while asleep.
+The inferred dock hint does not change this policy.
 
 - Normal display mode disables Wi-Fi modem sleep, keeping the receiver awake
   even when the CPU is idle. Wi-Fi requests the SDK's maximum TX cap (20 dBm),
   subject to the radio's PHY limits. RX has no independent power-level setting.
-  Dim/off use maximum modem sleep with a listen interval of ten AP beacon
+  Dim uses maximum modem sleep with a listen interval of ten AP beacon
   intervals; the TX cap stays high to preserve the link. Larger HTTP transfers
   temporarily disable modem sleep, then restore the current display policy.
-  Web access can have higher latency in dim/off. These radio settings do not
+  Web access can have higher latency in dim. These radio settings do not
   change the CPU idle policy.
 - Entering dim/off disconnects the HA WebSocket, stops HA reconnects, heartbeats,
   subscriptions and REST reads, and cancels queued commands and entity-list
@@ -196,7 +197,13 @@ not use the inferred dock hint to change its power policy.
 - Display off sends the LCD controller to sleep as well as setting backlight
   brightness to zero. Wake paints `--` before lighting the screen; asynchronous
   HA results then fill in the values.
-  Screenshot reads temporarily wake the controller with the backlight off.
+  Off waits for HTTP work, firmware uploads, sounds and LED animations to finish
+  before stopping the network and sleeping. GPIO35 (keypad) and GPIO39/38/37
+  (Core A/B/C) wake the CPU. With an unverified/faulty keypad IRQ, one-second
+  timer wakes poll for keys; with a verified IRQ, health wakes run every minute.
+  Timer wakes leave the screen and Wi-Fi off. A keypad wake can take up to one
+  second with the polling fallback. Sleep setup failures retain input polling.
+  Other board models retain the LCD-only Off behavior.
 - The speaker task and DAC stop one second after a sound finishes. GPIO25 is
   driven low on Core Basic. This quiets the signal path; the board does not
   provide a separate amplifier shutdown control.
@@ -221,10 +228,12 @@ not use the inferred dock hint to change its power policy.
 `wifi_rssi_dbm` (-127 while disconnected), `wifi_tx_power_qdbm` (quarter-dBm;
 80 means 20 dBm, -1 means unavailable),
 `power_idle`, actual `cpu_mhz`, `wifi_sleep`, `lcd_sleep`,
-`audio_quiet`, polling intervals, REST counters, `ws_state_ready`, watched entity
-count, state events, and subscription errors. Power saving on the dock can be
+`audio_quiet`, `network_suspended`, `light_sleep_entries`, `light_sleep_ms`,
+`light_sleep_errors`, `light_sleep_last_wake`, polling intervals, REST counters,
+`ws_state_ready`, watched entity count, state events, and subscription errors. Power saving on the dock can be
 verified through these states, but battery runtime or current savings need an
-off-dock runtime test or a current meter.
+off-dock runtime test or a current meter. Sleep counters can be read after
+waking; diagnostics cannot be fetched while Wi-Fi is off.
 
 `keypad_irq_verified`, `keypad_irq_reads`, `keypad_reads` and `keypad_irq_faults`
 show whether IRQ mode is working. `backlight_clock_checks` counts time-of-day
@@ -252,7 +261,8 @@ disable it. If dimming is disabled, the off timeout counts from the last input.
 | Dim | Black background, faint grey text, all values `--`, static icons | Wakes; refreshes the action target, then performs the requested action once |
 | Off | Backlight off | Wakes the display only; release and press again to act |
 
-These rules cover the Core buttons, keypad, and serial navigation keys. A Core
+These rules cover the Core buttons and keypad, plus serial navigation while the
+CPU is awake. Use a physical key to wake from sleep. A Core
 A/B/C press used to wake an off display is suppressed until release; holding B
 cannot open a detail panel during that wake press. In dim, navigation works on
 the first press. A short B press or keypad/serial action captures its original
@@ -266,9 +276,13 @@ HA values and clock messages are suspended in dim/off. The local monotonic clock
 continues advancing from its last HA sample, so idle deadlines and day/night
 scheduling still run. Background scheduling may make the display darker or turn
 it off; it does not wake or brighten it.
-Web **Wake**, **Dim**, and **Off** preview the display using saved brightness
-settings without saving or running an entity action. Device input clears the
-preview, resets idle time, and restores the normal view.
+Web **Wake**, **Dim**, and **Off** use saved brightness settings without saving
+or running an entity action. Manual Dim, including R5C1, counts the active day
+or night Off timeout from entering Dim; `0` leaves it dim until input. Changing
+periods applies that period's Off timeout. R5C1 in Dim immediately enters Off.
+A wake press restores normal mode and refreshes HA; the press performs no
+entity action. Web Wake is available during Dim, but sleeping Off requires a
+device key. No saved timeouts are changed.
 
 ## Home Assistant time
 
@@ -364,7 +378,8 @@ working memory. Capturing does not wake the display or change pages.
 
 Backlight diagnostics include `backlight=normal|dim|off`, `backlight_pwm` (0–255),
 `dim_theme` (0/1), and `display_override` (-1 for automatic, 1 for Dim preview,
-2 for Off preview).
+2 for manual Off). Dim follows the active saved Off timeout. Sleep diagnostics
+are retained across light sleep and available after waking.
 Clock diagnostics include `time_source=ha|unavailable`, `ha_timezone`,
 `utc_offset` (seconds east of UTC), `local_time`, and `ha_clock_age` (seconds
 since the last valid sample). Reading diagnostics does not count as activity.
@@ -434,7 +449,7 @@ Cursor movement wraps within the current page and skips empty menu slots.
 | r1c2 (M) / r1c3 (%) | Previous / next page, wrapping at either end; main menu only |
 | 1–8 | Select and run that main-menu slot; in AC detail, 1–7 only focus a control |
 | r3c4 (+) / r4c4 (−) | Increase / decrease the selected adjustable value |
-| r5c1 (.) | Dim the display and pause HA updates; another press stays dim. From off, wake only |
+| r5c1 (.) | Normal → Dim → Off (sleep) → wake only |
 | 0 | Cancel a temperature edit; otherwise return to the main menu |
 | r5c4 (=), short or long press | Open AC detail if available; otherwise toggle/run the selected entity. In AC detail, activate the control or confirm an edit |
 
@@ -448,9 +463,9 @@ r4      7    8    9    -
 ```
 
 There are eight menu slots, so 9 has no assigned slot. The physical bottom-left
-`.` key (r5c1) dims from either the menu or AC detail; serial `.` still opens AC
-detail. This uses the same dim preview as web **Dim**, until another input wakes
-the device.
+`.` key (r5c1) dims from either the menu or AC detail. Pressing it in Dim puts
+the device to sleep immediately; pressing it in Off only wakes the device.
+Serial `.` still opens AC detail when awake.
 
 ### Adjusting values
 
@@ -627,4 +642,5 @@ python3 tools/test_web_config.py
 python3 tools/test_network_hostname.py
 python3 tools/test_connected_power.py
 python3 tools/test_idle_io.py
+python3 tools/test_off_sleep.py
 ```

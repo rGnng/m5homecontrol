@@ -71,7 +71,7 @@ static String menuValue;
 static String entityStateText(const EntityState& e);
 enum class BacklightPhase {Normal,Dim,Off};
 static BacklightPhase g_backlightPhase=BacklightPhase::Normal;
-bool setDisplayMode(const String& mode){assert(mode=="dim");g_backlightPhase=BacklightPhase::Dim;suspended=true;return true;}
+bool setDisplayMode(const String& mode){assert(mode=="dim" || mode=="off");g_backlightPhase=mode=="dim"?BacklightPhase::Dim:BacklightPhase::Off;suspended=true;return true;}
 static void noteActivity(){g_backlightPhase=BacklightPhase::Normal;}
 static bool acDetailActive(){return g_detail && entity.type==EntityType::Climate;}
 static EntityState& acEntity(){return entity;}
@@ -180,7 +180,8 @@ int main(){
     for(uint8_t c: ignored) assert(remapKeypadKey(c)==0);
     light();handleKey(remapKeypadKey('.'));
     assert(g_backlightPhase==BacklightPhase::Dim && suspended && calls.empty() && actions==0);
-    handleKey(remapKeypadKey('.'));assert(g_backlightPhase==BacklightPhase::Dim && calls.empty());
+    handleKey(remapKeypadKey('.'));assert(g_backlightPhase==BacklightPhase::Off && calls.empty());
+    handleKey(remapKeypadKey('.'));assert(g_backlightPhase==BacklightPhase::Normal && calls.empty());
     climate();handleKey('.');assert(g_detail && g_backlightPhase==BacklightPhase::Normal); // Serial . retains detail.
     light();g_backlightPhase=BacklightPhase::Off;handleKey(remapKeypadKey('.'));
     assert(g_backlightPhase==BacklightPhase::Normal && !g_detail && calls.empty());

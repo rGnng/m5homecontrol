@@ -30,7 +30,7 @@ prefix = r'''
 #include <cstring>
 #include <vector>
 AppConfig g_config;
-static constexpr int ESP_OK=0,WIFI_STA=1,WIFI_IF_STA=1,WL_CONNECTED=3;
+static constexpr int ESP_OK=0,WIFI_OFF=0,WIFI_STA=1,WIFI_IF_STA=1,WL_CONNECTED=3;
 struct esp_netif_t {String hostname="esp32-D75ED0";};
 static esp_netif_t netif;
 static bool netifPresent=true,hostnameReadOk=true;
@@ -45,10 +45,10 @@ static int esp_wifi_set_config(int mode,const wifi_config_t* in){assert(mode==WI
 static std::vector<String> offeredHostnames;
 struct FakeWiFi {
     String cache="esp32-D75ED0";
-    bool started=false,online=false;
+    bool started=false,online=false;int starts=0;
     bool setHostname(const char* name){cache=String(name).substr(0,31);return true;}
     const char* getHostname(){return cache.c_str();}
-    bool mode(int value){assert(value==WIFI_STA);if(!started)netif.hostname=cache;started=true;return true;}
+    bool mode(int value){if(value==WIFI_OFF){started=online=false;return true;}assert(value==WIFI_STA);if(!started){netif.hostname=cache;++starts;}started=true;return true;}
     void setSleep(bool enabled){assert(!enabled);}
     void begin(const char*,const char*,int,const void*,bool connect){assert(started && !connect);radioConfig.sta.listen_interval=3;}
     void begin(){assert(started);offeredHostnames.push_back(netif.hostname);online=true;}
@@ -61,11 +61,11 @@ struct FakeWiFi {
 
 };
 static FakeWiFi WiFi;
-static bool g_apMode=false,apStarted=false;
+static bool g_apMode=false,apStarted=false,g_networkSuspended=false;
 static bool g_wifiWasConnected=false,g_staEverConnected=false,g_mdnsStarted=false,g_serverStarted=true;
-static struct {void handleClient(){}}server;
-static struct {bool begin(const char*){return true;}void addService(const char*,const char*,int){}}MDNS;
-static void startWebServer(){}
+static struct {int calls=0,stops=0;void handleClient(){++calls;}void stop(){++stops;}struct Client{void stop(){}};Client client(){return {};}}server;
+static struct {bool begin(const char*){return true;}void addService(const char*,const char*,int){}void end(){}}MDNS;
+static void startWebServer(){g_serverStarted=true;}
 static uint32_t g_connectStart=0,g_lastReconnect=0;
 static uint32_t millis(){return 100;}
 static void startAccessPoint(){apStarted=true;}
@@ -91,6 +91,18 @@ int main(){
         WiFi.begin();networkLoop();assert(txPowerRequests==3 && g_wifiWasConnected);
         assert(offeredHostnames.back()==name && radioConfig.sta.listen_interval==10);
     }
+    // Off must stop the radio and services, remain offline through health ticks,
+    // then reapply DHCP/listen configuration and reopen web/mDNS after input.
+    assert(networkSetSuspended(true) && networkSuspended());
+    assert(!WiFi.started && !g_serverStarted && !g_mdnsStarted && !g_staEverConnected);
+    int calls=server.calls,starts=WiFi.starts,stops=server.stops;
+    networkLoop();networkLoop();assert(server.calls==calls && WiFi.starts==starts);
+    networkSetSuspended(true);assert(server.stops==stops);
+    assert(networkSetSuspended(false) && !networkSuspended());
+    assert(WiFi.started && radioConfig.sta.listen_interval==10);
+    assert(offeredHostnames.back()==g_config.hostname);
+    networkLoop();assert(g_serverStarted && g_mdnsStarted && g_staEverConnected);
+    networkSetSuspended(false);assert(WiFi.starts==starts+1);
     // The application's name fits the core's terminating 32-byte cache.
     String longName(32,'a');auto cleaned=sanitizeHostname(longName);
     assert(cleaned.size()==31);
@@ -108,7 +120,7 @@ with tempfile.TemporaryDirectory(prefix='m5-hostname-') as directory:
     (tmp / 'Arduino.h').write_text(arduino)
     constants = source[source.index('static const char* DEFAULT_HOSTNAME'):source.index('\n\nAppConfig g_config;')]
     code = prefix + constants + '\n' + ''.join(function(s) for s in ['static String sanitizeHostname(',
-                                                'static String stationHostname() {', 'static void setMaximumWifiTxPower(', 'void networkBegin(', 'void networkLoop(']) + tests
+                                                'static String stationHostname() {', 'static void setMaximumWifiTxPower(', 'void networkBegin(', 'void networkLoop(', 'bool networkSuspended(', 'bool networkSetSuspended(']) + tests
     (tmp / 'test.cpp').write_text(code)
     subprocess.run(['g++', '-std=c++17', '-Wall', '-Wextra', '-Werror', f'-I{tmp}',
                     f'-I{ROOT / "include"}', str(tmp / 'test.cpp'), '-o', str(tmp / 'test')], check=True)

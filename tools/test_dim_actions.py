@@ -50,8 +50,8 @@ static EntityState& acEntity(){return g_cards[g_detailGlobal];}
 static bool acDetailActive(){return g_detail && acEntity().type==EntityType::Climate;}
 static EntityState& selectedEntity(){return g_detail?acEntity():cardAt(g_focus);}
 bool setDisplayMode(const String& mode){
-    assert(mode=="dim");if(!suspended){suspended=true;++generation;}
-    g_backlightPhase=BacklightPhase::Dim;
+    assert(mode=="dim" || mode=="off");if(!suspended){suspended=true;++generation;}
+    g_backlightPhase=mode=="dim"?BacklightPhase::Dim:BacklightPhase::Off;
     for(auto& e:g_cards){e.available=false;e.aux.available=false;}return true;
 }
 static void noteActivity(){
