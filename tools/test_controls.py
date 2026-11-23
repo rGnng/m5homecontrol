@@ -176,7 +176,7 @@ int main(){
     for(unsigned i=0;i<sizeof(raw);++i) assert(remapKeypadKey(raw[i])==logical[i]);
     for(char c: {'A','\b','M','%','=','\r','0'}) assert(remapKeypadKey(c)==c);
     assert(remapKeypadKey('.')==KEYPAD_DIM_KEY);
-    const uint8_t ignored[]={0,255,'/','*','`'};
+    const uint8_t ignored[]={0,255,'/','*',0x60};
     for(uint8_t c: ignored) assert(remapKeypadKey(c)==0);
     light();handleKey(remapKeypadKey('.'));
     assert(g_backlightPhase==BacklightPhase::Dim && suspended && calls.empty() && actions==0);

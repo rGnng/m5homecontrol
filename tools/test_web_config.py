@@ -72,6 +72,8 @@ String networkIp(){return "192.0.2.1";}
 String haTimeZone(){return "Asia/Shanghai";}
 String haLocalTimeText(){return "2026-11-21T12:00:00";}
 static PowerStatus testPower;
+static bool testDock=false;
+bool dockConnected(){return testDock;}
 PowerStatus readPowerStatus(bool force){assert(force);return testPower;}
 static HaOptionsCallback optionsComplete;
 bool haFetchEntityOptions(HaOptionsCallback complete,int){optionsComplete=complete;return true;}
@@ -88,6 +90,7 @@ int main(){
     testPower.batteryPercent=100;
     assert(powerIcon().find("Battery: 100%")!=String::npos);
     assert(powerIcon().find("width=\"32\"")!=String::npos);
+    assert(dockIcon().find("aria-label=\"Docked\"")!=String::npos);
     testPower.batteryPercent=75;
     g_config.ssid="test";g_config.hostname="test-remote";g_config.haUrl="http://ha";g_config.haToken="test";
     for(int p=0;p<MAX_PAGES;++p)g_config.pageTitles[p]="Room & lights";
@@ -97,6 +100,7 @@ int main(){
         g_config.climateModes[i]=CLIMATE_COOL|CLIMATE_HEAT;
     }
     for(int pages: {1,3,MAX_PAGES}){
+        testDock=pages==3;
         server=WebServer{};serviced=0;g_config.pageCount=pages;g_config.entityCount=pages*GRID_SLOTS;
         g_config.daySleepMode=pages==3?SleepMode::Light:SleepMode::Deep;
         g_config.nightSleepMode=pages==3?SleepMode::Deep:SleepMode::Light;
@@ -112,6 +116,8 @@ int main(){
         assert(html.find("const SLOTS = 8;")!=std::string::npos);
         assert(html.find("function movePage(")!=std::string::npos);
         assert(html.find("function openConnection(")!=std::string::npos);
+        assert(html.find(testDock?"id=\"dock-status\" role=\"status\">":"id=\"dock-status\" role=\"status\" hidden>")!=std::string::npos);
+        assert(html.find("fetch('/dock'")!=std::string::npos);
         assert(html.find("new FormData(form)")!=std::string::npos);
         for(const char* period:{"d","n"}){
             const bool deep=String(period)=="d"?g_config.daySleepMode==SleepMode::Deep:g_config.nightSleepMode==SleepMode::Deep;
@@ -137,7 +143,7 @@ with tempfile.TemporaryDirectory(prefix='m5-web-config-') as directory:
     tmp = Path(directory)
     (tmp / 'Arduino.h').write_text(arduino)
     signatures = ['static String htmlEscape(', 'static String formatTime(',
-                  'static String htmlHeader(', 'static String htmlFooter(', 'static String powerIcon(',
+                  'static String htmlHeader(', 'static String htmlFooter(', 'static String powerIcon(', 'static String dockIcon(',
                   'static void refreshEntityOptions(', 'static void handleRoot(']
     (tmp / 'test.cpp').write_text(prefix + source[source.index('static String g_cachedEntityOptions;'):source.index('static void refreshEntityOptions(')] + ''.join(function(s) for s in signatures) + tests)
     subprocess.run(['g++', '-std=c++17', '-O2', '-Wall', '-Wextra', '-Werror', f'-I{tmp}',

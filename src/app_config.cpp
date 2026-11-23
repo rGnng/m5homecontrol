@@ -282,6 +282,7 @@ static String htmlHeader(const String& title) {
     h += "button[type=submit]{background:#eee;color:#000;border-color:#eee}";
     h += ".power-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px}";
     h += ".battery-icon{display:block;width:60px;height:auto;color:#ddd}";
+    h += ".power-icons{display:flex;align-items:center;gap:12px}.dock-icon{display:block;width:30px;height:30px;color:#ddd}";
     h += ".connection-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0}";
     h += ".connection-row+.connection-row{border-top:1px solid #222}.connection-info{min-width:0}";
     h += ".connection-name{display:block;color:#ddd;font-size:14px}.connection-value{display:block;color:#888;font-size:12px;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}";
@@ -345,7 +346,16 @@ static String powerSummary() {
     String text = "Battery: ";
     text += power.batteryPercent < 0 ? String("Unavailable")
                                     : String(power.batteryPercent) + "% (approximate)";
+    text += dockConnected() ? "\nDock: Docked" : "\nDock: Undocked";
     return text;
+}
+
+static String dockIcon() {
+    return "<svg class=\"dock-icon\" role=\"img\" aria-label=\"Docked\" viewBox=\"0 0 24 24\" "
+           "xmlns=\"http://www.w3.org/2000/svg\"><title>Docked</title>"
+           "<g fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\">"
+           "<rect x=\"6\" y=\"2\" width=\"12\" height=\"14\" rx=\"1\"/>"
+           "<path d=\"M3 13v8h18v-8M6 18h12M10 13h4\"/></g></svg>";
 }
 
 static String powerIcon() {
@@ -438,7 +448,9 @@ static void handleRoot() {
     page += "</div></fieldset>";
 
     page += "<fieldset><legend>Power</legend><div class=\"power-row\">";
-    page += "<span id=\"power-status\" role=\"status\">" + powerIcon() + "</span>";
+    page += "<div class=\"power-icons\"><span id=\"power-status\" role=\"status\">" + powerIcon() + "</span>";
+    page += "<span id=\"dock-status\" role=\"status\"" + String(dockConnected() ? "" : " hidden") + ">" +
+            dockIcon() + "</span></div>";
     page += "<button type=\"button\" class=\"secondary\" onclick=\"refreshPower()\">Refresh</button>";
     page += "</div></fieldset>";
 
@@ -481,8 +493,8 @@ static void handleRoot() {
     page += "<p>0 = disabled. Without dimming, Off counts from last input.</p>";
     page += "<p>Off uses the active day/night sleep mode, including R5C1 and web Off. "
             "Light sleep resumes the current view; keypad or Core A/B/C wakes it. "
-            "Deep sleep stays asleep until a keypad key is released, then restarts the remote. "
-            "Wi-Fi and web access stop in both modes.</p>";
+            "The keypad wakes deep sleep into the normal view; docking wakes either sleep mode into Dim. "
+            "While docked, only the screen turns off; Wi-Fi and web access stay available.</p>";
     page += "<div class=\"pagehead\">Preview display</div>";
     page += "<p>Dim follows the saved day/night Off timeout. Off follows the saved sleep mode; use the keypad to wake.</p>";
     page += "<div class=\"actions display-preview\" role=\"group\" aria-label=\"Display preview\">"
@@ -727,6 +739,7 @@ function openConnection() {
   document.getElementById('connection-modal').classList.add('open');
 }
 async function refreshPower() {
+  refreshDock();
   const status = document.getElementById('power-status');
   try {
     const response = await fetch('/power?format=icon', {cache: 'no-store'});
@@ -744,6 +757,19 @@ async function refreshPower() {
     }
   }
 }
+async function refreshDock() {
+  const status = document.getElementById('dock-status');
+  try {
+    const response = await fetch('/dock', {cache: 'no-store'});
+    if (!response.ok) throw new Error('Dock status unavailable');
+    const state = await response.json();
+    status.hidden = !state.docked;
+    status.removeAttribute('title');
+  } catch (error) {
+    status.title = 'Dock status unavailable';
+  }
+}
+setInterval(function() { if (!document.hidden) refreshDock(); }, 2000);
 async function previewDisplay(mode) {
   const buttons = [...document.querySelectorAll('.display-preview button')];
   buttons.forEach(button => {
@@ -1185,6 +1211,11 @@ static void startWebServer() {
             else server.send(202, "text/plain", "Loading");
         });
         server.on("/screenshot.bmp", HTTP_GET, handleScreenshot);
+        server.on("/dock", HTTP_GET, []() {
+            server.sendHeader("Cache-Control", "no-store");
+            server.send(200, "application/json", String("{\"docked\":") +
+                        (dockConnected() ? "true}" : "false}"));
+        });
         server.on("/power", HTTP_GET, []() {
             server.sendHeader("Cache-Control", "no-store");
             if (server.arg("format") == "icon") server.send(200, "image/svg+xml", powerIcon());
@@ -1220,6 +1251,7 @@ static void startWebServer() {
             text += " " + haConnectionStatus();
             text += " " + connectedPowerStatus();
             text += " " + commandLedsStatus();
+            text += " " + dockInputStatus();
             text += " charging=" + String(chargeStateName(power.charging));
             text += " core_charging=" + String(chargeStateName(power.coreCharging));
             text += " core_input=" + String(power.coreInput);

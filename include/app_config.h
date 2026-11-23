@@ -65,6 +65,8 @@ bool networkSuspended();
 bool configModeActive();
 String networkIp();
 String commandLedsStatus();
+String dockInputStatus();
+bool dockConnected();
 String menuStatus();
 String backlightStatus();
 String refreshStatus();

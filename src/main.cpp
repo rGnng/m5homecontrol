@@ -23,6 +23,8 @@
 #include "side_led_bus.h"
 #include "ha_client.h"
 #include "keypad_controls.h"
+#include "dock_input.h"
+#include "dock_led_animation.h"
 #include "sfx_data.h"
 #include "ui_font.h"
 #include "ui_font_data.h"
@@ -151,9 +153,9 @@ static bool g_statusTitleDirty = false;
 static bool g_statusCenterDirty = false;
 static bool g_statusLinkDirty = false;
 static bool g_statusBatteryDirty = false;
+static bool g_statusDockDirty = false;
 static int g_lastBatteryPct = -1;
 static bool g_lastCharging = false;
-static bool g_lastDockInferred = false;
 static wl_status_t g_lastWifiStatus = WL_IDLE_STATUS;
 static bool g_dirty[MAX_ENTITIES] = {false};
 
@@ -318,37 +320,66 @@ static std::atomic<bool> g_commandLedActive{false};
 static std::atomic<uint32_t> g_commandLedCount{0};
 static std::atomic<uint32_t> g_commandLedFrames{0};
 static std::atomic<uint16_t> g_commandLedPixels{0};
+static constexpr uint32_t DOCK_LED_EVENT = 1u << 24;
+static std::atomic<uint32_t> g_dockLedCount{0}, g_dockLedFrames{0};
+static std::atomic<uint16_t> g_dockLedPixels{0};
 
 static void commandLedTask(void*) {
     constexpr uint32_t STEP_MS = COMMAND_LED_DURATION_MS / 6;
-    uint32_t color = 0;
+    uint32_t color = 0, pendingColor = 0;
+    bool pending = false;
     for (;;) {
-        if (xTaskNotifyWait(0, UINT32_MAX, &color, portMAX_DELAY) != pdTRUE) continue;
+        if (pending) { color = pendingColor; pending = false; }
+        else if (xTaskNotifyWait(0, UINT32_MAX, &color, portMAX_DELAY) != pdTRUE) continue;
         uint32_t startedAt = millis();
         uint32_t frames = 0;
         uint16_t pixels = 0;
         g_commandLedActive.store(true);
+        auto saveFrames = [&]() {
+            if (color & DOCK_LED_EVENT) {
+                g_dockLedFrames.store(frames);
+                g_dockLedPixels.store(pixels);
+            } else {
+                g_commandLedFrames.store(frames);
+                g_commandLedPixels.store(pixels);
+            }
+        };
         for (;;) {
             uint32_t elapsed = millis() - startedAt;
-            if (elapsed >= COMMAND_LED_DURATION_MS) break;
-            uint32_t brightness = g_commandLedBrightness.load();
-            M5.Led.setAllColor(0, 0, 0);
-            for (int row = 0; row < 5; ++row) {
-                int distance = (int)(elapsed * 255 / STEP_MS) - row * 255;
-                int intensity = distance < 0 ? 255 + distance : 255 - distance / 2;
-                intensity = constrain(intensity, 0, 255);
-                auto scale = [&](uint8_t channel) -> uint8_t {
-                    return (channel * brightness * intensity + 32512) / 65025;
-                };
-                uint8_t r = scale((color >> 16) & 255);
-                uint8_t g = scale((color >> 8) & 255);
-                uint8_t b = scale(color & 255);
-                // Indices 0 and 9 are at the top; 4 and 5 are at the bottom.
-                int left = 4 - row;
-                int right = 5 + row;
-                M5.Led.setColor(left, r, g, b);
-                M5.Led.setColor(right, r, g, b);
-                if (r || g || b) pixels |= (1u << left) | (1u << right);
+            bool docking = color & DOCK_LED_EVENT;
+            if (elapsed >= (docking ? DOCK_LED_DURATION_MS : COMMAND_LED_DURATION_MS)) {
+                if (docking) {
+                    auto rgb = dockLedColor(DOCK_LED_DURATION_MS);
+                    M5.Led.setAllColor(rgb.red, rgb.green, rgb.blue);
+                    M5.Led.display();
+                    ++frames;
+                }
+                break;
+            }
+            if (docking) {
+                auto rgb = dockLedColor(elapsed);
+                M5.Led.setAllColor(rgb.red, rgb.green, rgb.blue);
+                pixels = 1023;
+            } else {
+                uint32_t brightness = g_commandLedBrightness.load();
+                M5.Led.setAllColor(0, 0, 0);
+                for (int row = 0; row < 5; ++row) {
+                    int distance = (int)(elapsed * 255 / STEP_MS) - row * 255;
+                    int intensity = distance < 0 ? 255 + distance : 255 - distance / 2;
+                    intensity = constrain(intensity, 0, 255);
+                    auto scale = [&](uint8_t channel) -> uint8_t {
+                        return (channel * brightness * intensity + 32512) / 65025;
+                    };
+                    uint8_t r = scale((color >> 16) & 255);
+                    uint8_t g = scale((color >> 8) & 255);
+                    uint8_t b = scale(color & 255);
+                    // Indices 0 and 9 are at the top; 4 and 5 are at the bottom.
+                    int left = 4 - row;
+                    int right = 5 + row;
+                    M5.Led.setColor(left, r, g, b);
+                    M5.Led.setColor(right, r, g, b);
+                    if (r || g || b) pixels |= (1u << left) | (1u << right);
+                }
             }
             M5.Led.display();
             ++frames;
@@ -356,17 +387,23 @@ static void commandLedTask(void*) {
             // Notification output can change even on timeout. Only accept a
             // new color when an actual command notification was received.
             uint32_t nextColor = 0;
-            if (xTaskNotifyWait(0, UINT32_MAX, &nextColor, pdMS_TO_TICKS(20)) == pdTRUE) {
-                color = nextColor;
-                startedAt = millis();
-                frames = 0;
-                pixels = 0;
+            if (xTaskNotifyWait(0, UINT32_MAX, &nextColor, pdMS_TO_TICKS(docking ? 10 : 20)) == pdTRUE) {
+                if (docking && !(nextColor & DOCK_LED_EVENT)) {
+                    // Finish docking feedback before the next HA sweep.
+                    pendingColor = nextColor;
+                    pending = true;
+                } else {
+                    saveFrames();
+                    color = nextColor;
+                    startedAt = millis();
+                    frames = 0;
+                    pixels = 0;
+                }
             }
         }
         M5.Led.setAllColor(0, 0, 0);
         M5.Led.display();
-        g_commandLedFrames.store(frames);
-        g_commandLedPixels.store(pixels);
+        saveFrames();
         g_commandLedActive.store(false);
     }
 }
@@ -407,7 +444,18 @@ String commandLedsStatus() {
     text += " command_leds_count=" + String((unsigned long)g_commandLedCount.load());
     text += " command_leds_frames=" + String((unsigned long)g_commandLedFrames.load());
     text += " command_leds_pixels=" + String((unsigned)g_commandLedPixels.load());
+    text += " dock_leds_count=" + String((unsigned long)g_dockLedCount.load());
+    text += " dock_leds_duration_ms=" + String(DOCK_LED_DURATION_MS);
+    text += " dock_leds_brightness_pct=" + String(DOCK_LED_BRIGHTNESS_PERCENT);
+    text += " dock_leds_frames=" + String((unsigned long)g_dockLedFrames.load());
+    text += " dock_leds_pixels=" + String((unsigned)g_dockLedPixels.load());
     return text;
+}
+
+static void animateDockLeds() {
+    if (!g_commandLedTask) return;
+    g_dockLedCount.fetch_add(1);
+    xTaskNotify(g_commandLedTask, DOCK_LED_EVENT, eSetValueWithOverwrite);
 }
 
 static uint32_t g_lastSoundAt = 0;
@@ -434,6 +482,54 @@ static void playUiSound(const uint8_t* data, size_t length) {
 static void sfxArrow() { playUiSound(sfx_arrow, sfx_arrow_len); }
 static void sfxSelect() { playUiSound(sfx_select, sfx_select_len); }
 
+static constexpr int DOCK_INPUT_PIN = 26;
+static bool g_dockInputAvailable = false;
+static DockInput g_dockInput;
+static bool g_resumeDeepSleep = false;
+static bool g_dockDimTimeout = false;
+static void onDocked();
+static void onUndocked();
+
+static void dockInputInit() {
+    g_dockInputAvailable = M5.getBoard() == m5::board_t::board_M5Stack;
+    if (!g_dockInputAvailable) return;
+    pinMode(DOCK_INPUT_PIN, INPUT_PULLUP);
+    bool previous = deepSleepWakeCause() == DeepWake::DockChange
+                        ? deepSleepDockLevel() == 0 : digitalRead(DOCK_INPUT_PIN) == LOW;
+    g_dockInput.begin(previous, millis());
+}
+
+static bool dockInputPending() {
+    return g_dockInputAvailable && (g_dockInput.pending() ||
+        (digitalRead(DOCK_INPUT_PIN) == LOW) != g_dockInput.docked());
+}
+
+static int dockInputLevel() {
+    return g_dockInputAvailable ? (g_dockInput.docked() ? LOW : HIGH) : -1;
+}
+
+static void dockInputTick() {
+    if (!g_dockInputAvailable) return;
+    bool wasDocked = g_dockInput.docked();
+    bool docking = g_dockInput.update(digitalRead(DOCK_INPUT_PIN) == LOW, millis());
+    if (wasDocked != g_dockInput.docked()) {
+        g_statusDockDirty = true;
+        Serial.printf("[dock] gpio26=%s\n", g_dockInput.docked() ? "docked" : "undocked");
+    }
+    if (docking) onDocked();
+    else if (wasDocked && !g_dockInput.docked()) onUndocked();
+}
+
+String dockInputStatus() {
+    return "dock_gpio_pin=" + String(g_dockInputAvailable ? DOCK_INPUT_PIN : -1) +
+           " dock_gpio_level=" + String(g_dockInputAvailable ? digitalRead(DOCK_INPUT_PIN) : -1) +
+           " dock_detected=" + String(g_dockInputAvailable ? int(g_dockInput.docked()) : -1) +
+           " dock_events=" + String(g_dockInput.dockingEvents()) +
+           " undock_events=" + String(g_dockInput.undockingEvents());
+}
+
+bool dockConnected() { return g_dockInputAvailable && g_dockInput.docked(); }
+
 static uint32_t g_lastActivity = 0;
 static BacklightPhase g_backlightPhase = BacklightPhase::Normal;
 static int g_backlightOverride = -1;
@@ -443,7 +539,7 @@ static bool g_lcdSleeping = false;
 
 static void connectedPowerTick() {
     if (!g_audioQuiet && !M5.Speaker.isPlaying() && millis() - g_lastSoundAt >= 1000) quietAudio();
-    bool idle = (millis() - g_lastActivity >= 15000 || g_backlightPhase != BacklightPhase::Normal)
+    bool idle = !dockConnected() && (millis() - g_lastActivity >= 15000 || g_backlightPhase != BacklightPhase::Normal)
                 && !M5.Speaker.isPlaying();
     setConnectedPowerIdle(idle);
     setPowerPollingIdle(idle);
@@ -558,6 +654,8 @@ static bool setDisplayDataSuspended(bool suspended);
 static void scheduleTick(bool explicitInput = false);
 
 static void noteActivity() {
+    g_resumeDeepSleep = false;
+    g_dockDimTimeout = false;
     setConnectedPowerIdle(false);
     setPowerPollingIdle(false);
     networkSetSuspended(false);
@@ -574,7 +672,7 @@ static bool inTimeRange(int now, int start, int end) {
 
 static void applyBacklightPlan(BacklightPlan plan) {
     g_backlightPhase = plan.phase;
-    bool dataChanged = setDisplayDataSuspended(plan.phase != BacklightPhase::Normal);
+    bool dataChanged = setDisplayDataSuspended(plan.phase != BacklightPhase::Normal && !dockConnected());
     bool waking = g_lcdSleeping && plan.phase != BacklightPhase::Off;
     if (waking) {
         M5.Display.wakeup();
@@ -610,7 +708,6 @@ static void scheduleTick(bool explicitInput) {
         struct tm timeinfo;
         g_scheduleObservedClock = clockAvailable;
         g_scheduleClockReady = haGetLocalTime(timeinfo);
-        g_scheduleNight = false;
         if (g_scheduleClockReady) {
             int minute = timeinfo.tm_hour * 60 + timeinfo.tm_min;
             bool isDay = inTimeRange(minute, g_config.dayStart, g_config.dayEnd);
@@ -636,7 +733,7 @@ static void scheduleTick(bool explicitInput) {
     if (g_backlightOverride == (int)BacklightPhase::Dim) {
         plan = {BacklightPhase::Dim, dimBrightness < brightness ? dimBrightness : brightness};
         uint32_t offSeconds = night ? g_config.nightOffSeconds : g_config.dayOffSeconds;
-        if (clockReady && g_backlightPhase == BacklightPhase::Dim && offSeconds &&
+        if ((clockReady || g_dockDimTimeout) && g_backlightPhase == BacklightPhase::Dim && offSeconds &&
             now - g_dimStartedAt >= offSeconds * 1000)
             plan = {BacklightPhase::Off, 0};
     } else if (g_backlightOverride == (int)BacklightPhase::Off) {
@@ -662,7 +759,7 @@ static void scheduleTick(bool explicitInput) {
         if (dimAt && idleMs < dimAt && dimAt - idleMs < delayMs) delayMs = dimAt - idleMs;
         if (offSeconds && idleMs < offAt && offAt - idleMs < delayMs) delayMs = offAt - idleMs;
     }
-    if (clockReady && g_backlightOverride == (int)BacklightPhase::Dim &&
+    if ((clockReady || g_dockDimTimeout) && g_backlightOverride == (int)BacklightPhase::Dim &&
         g_backlightPhase == BacklightPhase::Dim) {
         uint32_t offMs = uint32_t(night ? g_config.nightOffSeconds : g_config.dayOffSeconds) * 1000;
         uint32_t dimMs = now - g_dimStartedAt;
@@ -684,6 +781,23 @@ bool setDisplayMode(const String& mode) {
     return true;
 }
 
+static void onDocked() {
+    g_resumeDeepSleep = false;
+    networkSetSuspended(false);
+    if (g_backlightPhase == BacklightPhase::Off) {
+        g_dockDimTimeout = true;
+        // Wake directly to Dim; awake modes and their idle timers are preserved.
+        g_lastActivity = g_dimStartedAt = millis();
+        setDisplayMode("dim");
+    } else {
+        // Resume live HA data while preserving the current mode and timers.
+        applyBacklightPlan({g_backlightPhase, g_backlightPercent});
+    }
+    animateDockLeds();
+}
+
+static void onUndocked() { noteActivity(); }
+
 String backlightStatus() {
     const char* state = g_backlightPhase == BacklightPhase::Dim ? "dim"
                          : (g_backlightPhase == BacklightPhase::Off ? "off" : "normal");
@@ -699,8 +813,9 @@ String backlightStatus() {
            " network_suspended=" + String(networkSuspended() ? 1 : 0) +
            " " + offSleepStatus() +
            " " + deepSleepStatus() +
-           " off_sleep_mode=" + String((g_scheduleNight ? g_config.nightSleepMode : g_config.daySleepMode)
-                                         == SleepMode::Deep ? "deep" : "light") +
+           " off_sleep_mode=" + String((g_resumeDeepSleep ||
+                                        (g_scheduleNight ? g_config.nightSleepMode : g_config.daySleepMode)
+                                         == SleepMode::Deep) ? "deep" : "light") +
            " " + keypadStatus();
 }
 
@@ -889,15 +1004,15 @@ static uint16_t entityStateColor(const EntityState& e) {
 //  Status bar
 // ---------------------------------------------------------------------
 static void drawBattery(LovyanGFX& g, int x, int y, int pct, bool charging,
-                        bool dockInferred) {
+                        bool docked) {
     // Monochrome battery icon, same color as the signal bars.
     const uint16_t mono = g_theme.barText;
     g.drawRect(x, y, 18, 12, mono);
     g.drawRect(x - 1, y - 1, 20, 14, mono);
     g.fillRect(x + 20, y + 4, 2, 5, mono);
 
-    if (dockInferred) {
-        // Plug overlay means assumed dock power, with no charging/full claim.
+    if (docked) {
+        // Physical dock contact; this does not establish charging/full status.
         g.fillRect(x + 6, y + 2, 2, 3, mono);
         g.fillRect(x + 10, y + 2, 2, 3, mono);
         g.fillRect(x + 5, y + 5, 8, 4, mono);
@@ -986,7 +1101,7 @@ static void drawStatusBar(LovyanGFX& g) {
     drawLinkIcon(g, 270, 5);
     PowerStatus power = readPowerStatus();
     drawBattery(g, 294, 6, power.batteryPercent,
-                power.charging == ChargeState::Charging, power.dockInferred);
+                power.charging == ChargeState::Charging, dockConnected());
 }
 
 // ---------------------------------------------------------------------
@@ -1362,13 +1477,26 @@ static void redrawRow(int slot, bool selected) {
 }
 
 static void redrawStatusRegions() {
-    if (haDataSuspended()) return;
+    bool frozen = haDataSuspended();
+    if (frozen && !g_statusDockDirty) return;
     if (!g_statusTitleDirty && !g_statusCenterDirty &&
-        !g_statusLinkDirty && !g_statusBatteryDirty) {
+        !g_statusLinkDirty && !g_statusBatteryDirty && !g_statusDockDirty) {
         return;
     }
 
     M5.Display.startWrite();
+    if (g_statusDockDirty || (!frozen && g_statusBatteryDirty)) {
+        M5.Display.fillRect(290, 0, 30, SB_H, g_theme.barBg);
+        PowerStatus power = readPowerStatus();
+        drawBattery(M5.Display, 294, 6, power.batteryPercent,
+                    power.charging == ChargeState::Charging, dockConnected());
+        g_statusDockDirty = false;
+        g_statusBatteryDirty = false;
+    }
+    if (frozen) {
+        M5.Display.endWrite();
+        return;
+    }
     if (g_statusTitleDirty) {
         M5.Display.fillRect(0, 0, 96, SB_H, g_theme.barBg);
         drawStatusTitle(M5.Display);
@@ -1381,12 +1509,6 @@ static void redrawStatusRegions() {
         M5.Display.fillRect(264, 0, 26, SB_H, g_theme.barBg);
         drawLinkIcon(M5.Display, 270, 5);
     }
-    if (g_statusBatteryDirty) {
-        M5.Display.fillRect(290, 0, 30, SB_H, g_theme.barBg);
-        PowerStatus power = readPowerStatus();
-        drawBattery(M5.Display, 294, 6, power.batteryPercent,
-                    power.charging == ChargeState::Charging, power.dockInferred);
-    }
     M5.Display.endWrite();
 
     g_statusTitleDirty = false;
@@ -1396,7 +1518,11 @@ static void redrawStatusRegions() {
 }
 
 static void renderDirty() {
-    if (g_lcdSleeping || haDataSuspended()) return;  // Retain dirty flags; wake repaints the latest cached state.
+    if (g_lcdSleeping) return;
+    if (haDataSuspended()) {
+        redrawStatusRegions();  // Only dock state may change the static Dim bar.
+        return;
+    }
     if (g_detail) {
         bool detailDirty = (g_detailGlobal >= 0 && g_dirty[g_detailGlobal]);
         for (int i = 0; i < MAX_ENTITIES; i++) g_dirty[i] = false;
@@ -2306,16 +2432,18 @@ void setup() {
     // Calculator3 latches the wake key until read. Consume it before normal
     // polling so the wake key cannot run an entity action after boot.
     restoreKeypadAfterDeepSleep();
+    dockInputInit();
     keypadInit();
     initCommandLeds();
 
     PowerStatus power = readPowerStatus();
     g_lastBatteryPct = power.batteryPercent;
     g_lastCharging = power.charging == ChargeState::Charging;
-    g_lastDockInferred = power.dockInferred;
     g_lastWifiStatus = WiFi.status();
 
-    uint8_t brightness = constrain(g_config.brightness, (uint8_t)1, (uint8_t)100);
+    bool dockWake = deepSleepWakeCause() == DeepWake::DockChange;
+    if (dockWake) g_scheduleNight = deepSleepWasNight();
+    uint8_t brightness = dockWake ? 0 : constrain(g_config.brightness, (uint8_t)1, (uint8_t)100);
     M5.Display.setBrightness((uint8_t)((brightness * 255 + 50) / 100));
     g_commandLedBrightness.store((uint8_t)((brightness * 255 + 50) / 100));
 
@@ -2353,9 +2481,19 @@ void setup() {
     haSetAuthCallback(onHaAuth);
     haSetCommandCallback(animateHaCommandLeds);
 
-    // Show the main UI immediately. Networking continues in the background.
-    networkBegin();
-    renderInitial();
+    if (dockWake) {
+        // Debounce the RTC wake before lighting the screen. An undock wake
+        // remains Off and returns to deep sleep without starting Wi-Fi.
+        g_resumeDeepSleep = true;
+        g_backlightOverride = (int)BacklightPhase::Off;
+        g_offStartedAt = millis();
+        networkSetSuspended(true);
+        applyBacklightPlan({BacklightPhase::Off, 0});
+    } else {
+        // Show the main UI immediately. Networking continues in the background.
+        networkBegin();
+        renderInitial();
+    }
 
     Serial.printf("[boot] ready bright=%u%% entities=%u pages=%d ha=%s\n",
                   brightness, g_config.entityCount, pageCount(),
@@ -2364,30 +2502,31 @@ void setup() {
 
 static void offSleepTick() {
     if (g_backlightPhase != BacklightPhase::Off ||
-        M5.getBoard() != m5::board_t::board_M5Stack) return;
+        M5.getBoard() != m5::board_t::board_M5Stack || dockConnected()) return;
     // Let the Off response leave the socket and allow active work to drain.
     if (millis() - g_offStartedAt < 500 || haHttpBusy() || connectedPowerWorkActive() ||
-        g_commandLedActive.load() || !g_audioQuiet) return;
+        g_commandLedActive.load() || !g_audioQuiet || dockInputPending()) return;
     if (!networkSetSuspended(true)) return;
 
     bool keypadWake = g_keypadIrqAvailable && !g_keypadIrqFault;
     if (g_keypadIrqAvailable) detachInterrupt(digitalPinToInterrupt(KEYPAD_IRQ_PIN));
     bool scheduledDeep = (g_scheduleNight ? g_config.nightSleepMode : g_config.daySleepMode) == SleepMode::Deep;
-    if (scheduledDeep && keypadWake) {
-        enterDeepSleep();
+    if ((g_resumeDeepSleep || scheduledDeep) && keypadWake) {
+        enterDeepSleep(dockInputLevel(), g_scheduleNight);
         // Successful deep sleep never returns. Restore the UI on a failed or
         // cancelled entry, including a key arriving just before sleep.
         if (g_keypadIrqAvailable)
             attachInterrupt(digitalPinToInterrupt(KEYPAD_IRQ_PIN), keypadInterrupt, FALLING);
+        if (dockInputPending()) return;
         g_lastKeyPoll = millis() - KEYPAD_IRQ_HEALTH_MS;
         keypadPoll();
         noteActivity();
         return;
     }
-    OffWake wake = sleepWhileOff(keypadWake, g_keypadIrqVerified ? 60000 : 1000);
+    OffWake wake = sleepWhileOff(keypadWake, g_keypadIrqVerified ? 60000 : 1000, dockInputLevel());
     if (g_keypadIrqAvailable)
         attachInterrupt(digitalPinToInterrupt(KEYPAD_IRQ_PIN), keypadInterrupt, FALLING);
-    if (wake != OffWake::Input) return;  // Health wakes keep LCD and Wi-Fi off.
+    if (wake != OffWake::Input) return;  // Dock changes are debounced next loop; timers stay Off.
 
     // Preserve wake-only handling even if M5's button debounce completes later.
     g_wakeOnlyButtons |= (digitalRead(39) == LOW ? 1 : 0) |
@@ -2400,6 +2539,7 @@ static void offSleepTick() {
 
 void loop() {
     M5.update();
+    dockInputTick();
     readPowerStatus();
     noteButtonActivity();
     networkLoop();
@@ -2449,11 +2589,9 @@ void loop() {
         PowerStatus power = readPowerStatus();
         int pct = power.batteryPercent;
         bool charging = power.charging == ChargeState::Charging;
-        if (pct != g_lastBatteryPct || charging != g_lastCharging ||
-            power.dockInferred != g_lastDockInferred) {
+        if (pct != g_lastBatteryPct || charging != g_lastCharging) {
             g_lastBatteryPct = pct;
             g_lastCharging = charging;
-            g_lastDockInferred = power.dockInferred;
             g_statusBatteryDirty = true;
         }
 

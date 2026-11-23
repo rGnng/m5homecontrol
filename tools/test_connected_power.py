@@ -149,6 +149,8 @@ struct {struct Speaker Speaker;Panel Display;m5::board_t getBoard(){return m5::b
 static uint32_t g_lastSoundAt=0,g_lastActivity=0;
 static bool g_audioQuiet=false,g_lcdSleeping=false,g_dimTheme=false;
 static BacklightPhase g_backlightPhase=BacklightPhase::Normal;
+static bool isDocked=false;
+bool dockConnected(){return isDocked;}
 static void applyBacklightPercent(uint8_t value){panelEvents.push_back("brightness="+String(value));}
 static void applyTheme(){panelEvents.push_back("theme");}
 static void renderInitial(){panelEvents.push_back("paint");}
@@ -212,6 +214,14 @@ int main(){
     panelEvents.clear();assert(!beginDisplayRead());endDisplayRead(false);assert(panelEvents.empty());
     applyBacklightPlan({BacklightPhase::Dim,1});assert(g_dimTheme && !g_lcdSleeping);
     applyBacklightPlan({BacklightPhase::Normal,5});
+    // Dock power preserves live HA and active CPU/radio policy in every screen state.
+    isDocked=true;
+    for(auto phase:{BacklightPhase::Normal,BacklightPhase::Dim,BacklightPhase::Off}){
+        applyBacklightPlan({phase,static_cast<uint8_t>(phase==BacklightPhase::Off?0:1)});
+        connectedPowerTick();assert(!suspended && !idle && !pollIdle);
+    }
+    assert(g_lcdSleeping); // Only the LCD follows Off; device sleep is separately blocked.
+    isDocked=false;applyBacklightPlan({BacklightPhase::Normal,5});
     // Initial sweep includes all configured slots and AUX values, then remains quiet.
     now=20000;g_config.entityCount=4;
     g_cards[0].id="light.a";g_cards[0].aux.id="switch.aux";

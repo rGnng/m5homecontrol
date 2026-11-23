@@ -21,12 +21,13 @@ gpio = r'''
 #include <cassert>
 #include <set>
 using gpio_num_t=int;
-inline constexpr int GPIO_NUM_39=39,GPIO_NUM_38=38,GPIO_NUM_37=37,GPIO_NUM_35=35;
-inline constexpr int GPIO_INTR_LOW_LEVEL=0,ESP_OK=0,ESP_FAIL=-1;
+inline constexpr int GPIO_NUM_39=39,GPIO_NUM_38=38,GPIO_NUM_37=37,GPIO_NUM_35=35,GPIO_NUM_26=26;
+inline constexpr int GPIO_INTR_LOW_LEVEL=0,GPIO_INTR_HIGH_LEVEL=1,ESP_OK=0,ESP_FAIL=-1;
 inline std::set<int> lowPins,armedPins;
 inline int failPin=-1;
+inline int dockMode=-1;
 inline int gpio_get_level(int pin){return lowPins.count(pin)?0:1;}
-inline int gpio_wakeup_enable(int pin,int mode){assert(mode==GPIO_INTR_LOW_LEVEL);if(pin==failPin)return ESP_FAIL;armedPins.insert(pin);return ESP_OK;}
+inline int gpio_wakeup_enable(int pin,int mode){if(pin==26)dockMode=mode;else assert(mode==GPIO_INTR_LOW_LEVEL);if(pin==failPin)return ESP_FAIL;armedPins.insert(pin);return ESP_OK;}
 inline int gpio_wakeup_disable(int pin){assert(armedPins.erase(pin)==1);return ESP_OK;}
 '''
 sleep = r'''
@@ -39,10 +40,11 @@ inline int sleepResult=ESP_OK,wakeCause=ESP_SLEEP_WAKEUP_TIMER,sleeps=0;
 inline uint64_t timerMicros=0;
 inline int64_t microsNow=0;
 inline std::set<int> pinsAtSleep;
+inline int dockAtWake=-1;
 inline int esp_sleep_enable_gpio_wakeup(){if(failGpio)return ESP_FAIL;gpioEnabled=true;return ESP_OK;}
 inline int esp_sleep_enable_timer_wakeup(uint64_t us){if(failTimer)return ESP_FAIL;timerEnabled=true;timerMicros=us;return ESP_OK;}
 inline int esp_sleep_disable_wakeup_source(int source){if(source==ESP_SLEEP_WAKEUP_GPIO)gpioEnabled=false;else{assert(source==ESP_SLEEP_WAKEUP_TIMER);timerEnabled=false;}return ESP_OK;}
-inline int esp_light_sleep_start(){assert(gpioEnabled && timerEnabled);++sleeps;pinsAtSleep=armedPins;microsNow+=timerMicros;now+=timerMicros/1000;return sleepResult;}
+inline int esp_light_sleep_start(){assert(gpioEnabled && timerEnabled);++sleeps;pinsAtSleep=armedPins;microsNow+=timerMicros;now+=timerMicros/1000;if(dockAtWake==0)lowPins.insert(26);else if(dockAtWake==1)lowPins.erase(26);return sleepResult;}
 inline int esp_sleep_get_wakeup_cause(){return wakeCause;}
 '''
 hardware_tests = r'''
@@ -74,6 +76,18 @@ int main(){
     failGpio=false;failTimer=true;assert(sleepWhileOff(true,1000)==OffWake::Error);clean();
     failTimer=false;sleepResult=ESP_FAIL;assert(sleepWhileOff(true,1000)==OffWake::Error);clean();
     assert(offSleepStatus().find("light_sleep_errors=7")!=String::npos);
+    sleepResult=ESP_OK;wakeCause=ESP_SLEEP_WAKEUP_GPIO;dockAtWake=0;
+    assert(sleepWhileOff(true,1000,1)==OffWake::DockChange);clean();
+    assert(dockMode==GPIO_INTR_LOW_LEVEL && pinsAtSleep.count(26));
+    dockAtWake=1;
+    assert(sleepWhileOff(true,1000,0)==OffWake::DockChange);clean();
+    assert(dockMode==GPIO_INTR_HIGH_LEVEL);
+    lowPins={26};calls=sleeps;
+    assert(sleepWhileOff(true,1000,1)==OffWake::DockChange && sleeps==calls);clean();
+    lowPins={26,35};assert(sleepWhileOff(true,1000,1)==OffWake::Input);clean();
+    lowPins.clear();dockAtWake=-1;failPin=26;
+    assert(sleepWhileOff(true,1000,1)==OffWake::Error);clean();
+    failPin=-1;
     std::puts("PASS: actual GPIO/timer sleep, all wake pins, pending-input race, partial setup cleanup and rejected sleep");
 }
 '''
@@ -91,7 +105,12 @@ static BacklightPhase g_backlightPhase=BacklightPhase::Off;
 static uint32_t g_offStartedAt=0,g_lastKeyPoll=0;
 static bool busy=false,work=false,g_audioQuiet=true,net=false,netOk=true;
 static int deepCalls=0;
-bool enterDeepSleep(){++deepCalls;return false;}
+bool enterDeepSleep(int,bool){++deepCalls;return false;}
+static bool g_resumeDeepSleep=false,dockPending=false;
+static bool isDocked=false;
+bool dockConnected(){return isDocked;}
+static bool dockInputPending(){return dockPending;}
+static int dockInputLevel(){return 1;}
 AppConfig g_config;
 static bool g_scheduleNight=false;
 static std::atomic<bool> g_commandLedActive{false};
@@ -111,13 +130,14 @@ static void detachInterrupt(int pin){assert(pin==35);++detaches;}
 static void attachInterrupt(int pin,void(*handler)(),int mode){assert(pin==35 && handler==keypadInterrupt && mode==FALLING);++attaches;}
 static char keypadPoll(){assert(now-g_lastKeyPoll>=1000);++polls;return 'D';}
 static void noteActivity(){++wakes;net=false;g_backlightPhase=BacklightPhase::Normal;}
-OffWake sleepWhileOff(bool keypad,uint32_t ms){assert(net && !busy && !work);assert(keypad==(g_keypadIrqAvailable && !g_keypadIrqFault));++sleepCalls;sleepMs=ms;return result;}
+OffWake sleepWhileOff(bool keypad,uint32_t ms,int dock){assert(dock==1);assert(net && !busy && !work);assert(keypad==(g_keypadIrqAvailable && !g_keypadIrqFault));++sleepCalls;sleepMs=ms;return result;}
 '''
 integration_tests = r'''
 int main(){
     // Normal/Dim, early Off, active HTTP/OTA, sound and LEDs may not sleep.
     for(auto phase:{BacklightPhase::Normal,BacklightPhase::Dim}){g_backlightPhase=phase;offSleepTick();}
     g_backlightPhase=BacklightPhase::Off;now=499;offSleepTick();now=10000;
+    isDocked=true;offSleepTick();assert(sleepCalls==0 && deepCalls==0);isDocked=false;
     busy=true;offSleepTick();busy=false;work=true;offSleepTick();work=false;
     g_audioQuiet=false;offSleepTick();g_audioQuiet=true;
     g_commandLedActive=true;offSleepTick();g_commandLedActive=false;
@@ -149,6 +169,11 @@ int main(){
     // Missing/faulty keypad cannot leave the device stuck in scheduled deep sleep.
     g_backlightPhase=BacklightPhase::Off;g_keypadIrqAvailable=false;offSleepTick();
     assert(deepCalls==2 && sleepCalls==10 && net);
+    // A dock wake leaves display/network asleep until debounce selects Dim.
+    result=OffWake::DockChange;offSleepTick();assert(wakes==4 && net);
+    int sleepsBefore=sleepCalls;dockPending=true;offSleepTick();assert(sleepCalls==sleepsBefore);
+    dockPending=false;g_keypadIrqAvailable=true;g_config.daySleepMode=SleepMode::Light;
+    g_scheduleNight=false;g_resumeDeepSleep=true;offSleepTick();assert(deepCalls==3);
     std::puts("PASS: actual Off orchestration, transfer/audio/LED guards, radio stop, timer-only suspension, fallback polling and wake-only input");
 }
 '''

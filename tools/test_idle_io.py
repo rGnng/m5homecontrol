@@ -72,6 +72,8 @@ static bool haGetLocalTime(struct tm& value){++timeConversions;value={};value.tm
 static uint32_t g_lastActivity=0;
 static int g_backlightOverride=-1;
 static BacklightPhase g_backlightPhase=BacklightPhase::Normal;
+static bool g_resumeDeepSleep=false;
+static bool g_dockDimTimeout=false;
 static uint8_t g_backlightPercent=30;
 static void applyBacklightPlan(BacklightPlan plan){++applies;g_backlightPhase=plan.phase;g_backlightPercent=plan.brightness;}
 static void scheduleTick(bool explicitInput=false);
@@ -216,6 +218,11 @@ int main(){
     resetSchedule();clockAvailable=false;g_config.dayOffSeconds=2;setDisplayMode("dim");
     now=10000;scheduleTick();assert(g_backlightPhase==BacklightPhase::Dim);
     clockAvailable=true;scheduleTick();assert(g_backlightPhase==BacklightPhase::Off);
+    // Docking uses the retained period's timer before a fresh HA time sample.
+    resetSchedule();clockAvailable=false;g_config.dayOffSeconds=2;g_dockDimTimeout=true;
+    setDisplayMode("dim");now=1999;scheduleTick();assert(g_backlightPhase==BacklightPhase::Dim);
+    now=2000;scheduleTick();assert(g_backlightPhase==BacklightPhase::Off);
+    noteActivity();assert(!g_dockDimTimeout && !g_resumeDeepSleep);
     std::puts("PASS: actual second clock cache, skipped background work, exact idle deadlines, immediate input/web wake, first time sync, day/night, disabled timers and rollover");
 }
 '''

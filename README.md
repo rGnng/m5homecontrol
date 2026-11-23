@@ -67,12 +67,13 @@ A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 - Right: combined Wi-Fi / HA link icon, then the battery icon
 - Wi-Fi is not configured: dim signal icon, blinking
 - While normal and connecting, retrying, or disconnected: the signal icon blinks; no red X
-- In dim/off, the status bar freezes; the deliberate HA pause does not blink
+- While undocked and Dim, the link and battery readings freeze; the battery's
+  plug overlay still follows GPIO26. Docked Dim retains live values and status updates
 - The icon follows Wi-Fi and the authenticated HA WebSocket; a failed entity
   command does not change connection status
 - Confirmed Core USB charging: bolt inside the battery icon
-- Assumed dock/external power: plug overlay; charging/full status remains unknown
-- Unavailable battery reading: `?` until the dock hint activates
+- Physically docked: plug inside the battery icon; charging/full status remains unknown
+- Unavailable battery reading while undocked: `?`
 - No clock, no battery percentage
 - The battery icon is monochrome, same color as the signal bars
 
@@ -99,23 +100,27 @@ brightness including the day/night schedule, and turns off after 300 ms.
 It runs independently of HTTP, so slow HA responses do not freeze it. A new
 command restarts the sweep. Polling and incoming state updates do not trigger it.
 
+Docking lights all ten LEDs together, fading from red through yellow to green over 350 ms
+at 15% peak LED brightness, fading in over the first 70 ms and out over the last
+70 ms. This brightness is independent
+of the screen setting. Dock feedback finishes before a queued HA command sweep.
+
 A black frame clears any latched LED color at startup. `/diag` reports command
 animation readiness, brightness (0-255), duration, theme color, active state,
 trigger count, and the last sweep's frame count and visited-pixel mask
 (`1023` means all ten pixels).
 
-The on-screen battery icon remains. On Core Basic, three consecutive unavailable
-PMIC samples show a plug over the battery: assumed dock/external power, with
-charging status unknown. A responding PMIC clears this hint immediately.
-This user-selected heuristic can also trigger on an I2C fault. Before it activates,
-an unavailable battery reading shows `?`, never an empty battery.
-Power is sampled every 500 ms while active and every 5 seconds while idle, so
-the hint takes roughly 1–1.5 seconds while active or 10–15 seconds while idle.
+The on-screen battery icon shows a plug whenever the GPIO26 contact detects the
+dock, even when battery telemetry is available. Undocking removes the plug;
+an unavailable battery reading shows `?`, never an empty battery. The screen's
+dock indication follows the 50 ms contact debounce independently of PMIC polling.
+Power is sampled every 500 ms while active and every 5 seconds while idle.
 
 The Bottom3 has its own TP4057 charger and a separate battery power switch.
 The Core's IP5306 readings do not directly report the TP4057 charging state.
-The four dock contacts are **J3**, wired as GND, SYS_5V, GPIO21/SDA, and
-GPIO22/SCL. **J4 is the separate battery connector**, not the dock pinout.
+The factory four dock contacts are **J3**, wired as GND, SYS_5V, GPIO21/SDA, and
+GPIO22/SCL. The completed [GPIO26 modification](#gpio26-dock-detection) repurposes
+one contact as SENSE. **J4 is the separate battery connector**.
 Dock SYS_5V feeds the TP4057 charger and, through isolation diode D1, BUS_5V
 for the running device. The TP4057 charges BAT; with the battery switch on,
 BAT_ON feeds the Core's battery connection. Off the dock, the Core's IP5306
@@ -146,7 +151,7 @@ power to wake it.
 
 Docked telemetry may still become unavailable even with boost keep-on enabled.
 In the device test, battery handoff continued working and live readings returned
-after undocking. A plug means assumed dock power, not confirmed charging/full;
+after undocking. The screen's plug means physically docked, without confirming charging/full;
 `?` means no current battery reading and does not mean empty.
 
 Web -> **Power** shows a battery icon; **Refresh** updates its fill level.
@@ -164,13 +169,20 @@ so actual dock charging detection requires a hardware status connection.
 
 ### Connected power saving
 
+While physically docked, the ESP32 stays awake at its active CPU speed with
+Wi-Fi modem sleep disabled, HA connected, and live updates running. The display
+still follows the normal day/night Dim and Off schedule; only the LCD sleeps
+when the screen is Off. Web configuration, screenshots, and OTA remain reachable.
+Picking up the device wakes the normal view and restarts its idle timers.
+
+**The following device power-saving rules apply only while undocked.** The
+GPIO26 input determines docking; PMIC inference does not change this policy.
 In normal display mode, the remote accepts live HA updates. Dim and off suspend
 HA data, show `--` for entity values, and freeze the status bar. Dim keeps Wi-Fi
 associated so web configuration, screenshots and OTA remain reachable. On Core
 Basic, Off stops Wi-Fi and uses the active day/night sleep-mode setting. Light
 sleep resumes on a keypad or Core A/B/C key; deep sleep boots the remote on a
 keypad key release. Web and OTA are unavailable while asleep.
-The inferred dock hint does not change this policy.
 
 - Normal display mode disables Wi-Fi modem sleep, keeping the receiver awake
   even when the CPU is idle. Wi-Fi requests the SDK's maximum TX cap (20 dBm),
@@ -204,7 +216,9 @@ The inferred dock hint does not change this policy.
   timer wakes poll for keys; with a verified IRQ, health wakes run every minute.
   Timer wakes leave the screen and Wi-Fi off. A keypad wake can take up to one
   second with the polling fallback. Sleep setup failures retain input polling.
-  Deep sleep uses GPIO35/EXT0, with no timer wakes. If the keypad is missing or
+  GPIO26 changes also wake light sleep for debounced dock detection. Deep sleep
+  uses GPIO35/EXT0 for the keypad and GPIO26/EXT1 for dock changes, with no timer
+  wakes. If the keypad is missing or
   its IRQ is faulty, Off falls back to light sleep. Other board models retain
   the LCD-only Off behavior.
 - The speaker task and DAC stop one second after a sound finishes. GPIO25 is
@@ -244,6 +258,56 @@ calculations; `backlight_checks` also includes idle deadlines and manual input.
 The IRQ pin follows the Calculator3's `G35_INT` net in its
 [manufacturer schematic](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1272/A005-V3-Faces_Calculator3_Sche.pdf).
 
+## GPIO26 dock detection
+
+The internal rewiring is complete on this unit:
+
+- **Cradle:** one outer contact, called **SENSE** here, is connected to ground
+- **Bottom3:** the matching contact is isolated from its original connection
+  and wired to **GPIO26 on the lower PCB**
+- GPIO26 uses the Core's internal pull-up; a grounded contact reads LOW when
+  docked, and the disconnected contact reads HIGH when undocked. No extra
+  resistor or 3.3V supply in the cradle is required
+
+The outer contact was described as pin 1 or 4 depending on viewing direction;
+identify SENSE by continuity rather than assuming a physical pin number. On the
+lower PCB schematic, G26 is **J2 pin 7 / FPC1 pin 14**. Port B's **O** signal is
+also GPIO26. The main I2C bus remains connected to the keypad and PMIC; only the
+selected dock-contact branch is repurposed. The dock's power and common ground
+connections remain in use. See the [Bottom3 schematic](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1273/A168_Faces_Bottom3_Sche.pdf).
+
+A stable LOW for 50 ms triggers the red-to-yellow-to-green LED animation without sound.
+A stable HIGH re-arms detection and wakes
+the screen to Normal without playing a sound.
+
+| Display state before docking | Display state after docking |
+| --- | --- |
+| Normal | Normal; idle timers unchanged |
+| Dim | Dim; idle timers unchanged |
+| Off / light sleep / deep sleep | Wake directly into Dim |
+
+While docked, device sleep and HA disconnection are disabled, including when
+the screen is Off. Screen brightness and Dim/Off timing still follow the saved
+schedule. Picking up from the dock always wakes the normal view; device power
+saving then follows the undocked policy.
+
+The screen shows a plug inside the battery icon when docked, including while
+Dim. The web **Power** section shows a separate dock symbol beside the battery
+and checks dock state every two seconds while the page is visible.
+These checks read the debounced input and do not poll the charger or wake the
+display. Both indicators confirm physical contact, not charging or a full battery.
+
+When docking wakes a sleeping device, the active period's dim-to-off timeout
+starts again. Deep sleep retains the last day/night period until a fresh HA
+clock sample arrives. A contact held closed does not repeatedly trigger feedback.
+An ordinary boot while already docked shows the icon without replaying the animation.
+
+`/diag` reports `dock_gpio_pin`, raw `dock_gpio_level`, debounced `dock_detected`,
+`dock_events`, `undock_events`, and `dock_leds_*` animation counters. PMIC dock
+inference remains separate. For a bench test, connect Port B **G to O**; leave
+**V (5V)** alone. Disconnect USB and battery before modifying traces; grounding
+an SCL contact still connected to the original bus would stop I2C communication.
+
 ## Backlight schedule
 
 Configure **Display** in the web page. Schedule times follow
@@ -269,7 +333,7 @@ Select Deep sleep for the desired period and use **Save and reboot** to apply it
 | Display state | Appearance | First device key press |
 | --- | --- | --- |
 | Normal | Selected theme and scheduled brightness | Performs its action and resets idle time |
-| Dim | Black background, faint grey text, all values `--`, static icons | Wakes; refreshes the action target, then performs the requested action once |
+| Dim | Black background and faint grey text; live values while docked, `--` while undocked | Wakes and performs the action; suspended targets are refreshed first |
 | Off | Backlight off | Wakes the display only; release and press again to act |
 
 These rules cover the Core buttons and keypad, plus serial navigation while the
@@ -283,7 +347,7 @@ action. A failed/unavailable refresh, another suspension, or a ten-second timeou
 skips the action. Extra actions for the same target are ignored while the check
 is pending. Holding B in dim opens/closes detail without also toggling on release.
 
-HA values and clock messages are suspended in dim/off. The local monotonic clock
+While undocked, HA values and clock messages are suspended in dim/off. The local monotonic clock
 continues advancing from its last HA sample, so idle deadlines and day/night
 scheduling still run. Background scheduling may make the display darker or turn
 it off; it does not wake or brighten it.
@@ -292,8 +356,8 @@ or running an entity action. Manual Dim, including R5C1, counts the active day
 or night Off timeout from entering Dim; `0` leaves it dim until input. Changing
 periods applies that period's Off timeout. R5C1 in Dim immediately enters Off.
 A wake press restores normal mode and refreshes HA; the press performs no
-entity action. Web Wake is available during Dim, but sleeping Off requires a
-device key. No saved timeouts are changed.
+entity action. Docked Off stays reachable through the web. Undocked sleeping
+Off requires a device key or a docking event. No saved timeouts are changed.
 
 ## Home Assistant time
 
@@ -305,7 +369,7 @@ Time updates are pushed by HA; there is no periodic REST time poll or NTP server
 - HA's configured timezone and current offset determine the day/night schedule,
   including daylight saving and timezone changes while connected
 - A 64-bit monotonic clock advances time between updates and while disconnected
-- While offline or suspended in dim/off, the last known offset is retained;
+- While offline or suspended in undocked Dim/Off, the last known offset is retained;
   timezone/DST changes are learned after reconnection, when a fresh clock
   subscription is created
 - Failed or invalid clock updates trigger a subscription retry after 30 seconds;
@@ -382,6 +446,7 @@ working memory. Capturing does not wake the display or change pages.
 | `POST /display` | Preview the display with form field `mode=wake`, `dim`, or `off`; settings are not saved |
 | `GET /power` | Current approximate battery percentage as text |
 | `GET /power?format=icon` | Battery icon; an unavailable reading shows `?` |
+| `GET /dock` | Physical dock state as JSON; no charger read or display wake |
 | `GET /diag` | Menu, backlight, LED, and power diagnostics; reading it does not wake the display |
 | `GET /screenshot.bmp` | Stream the current display as `ha-remote-screen.bmp`; does not redraw or wake the display |
 | `GET /update` | Firmware upload form; requires the firmware username/password |
@@ -477,17 +542,18 @@ There are eight menu slots, so 9 has no assigned slot. The physical bottom-left
 `.` key (r5c1) dims from either the menu or AC detail. Pressing it in Dim puts
 the device to sleep immediately; pressing it in Off only wakes the device.
 Serial `.` still opens AC detail when awake.
+R5C3 has no assigned action.
 
 ### Deep-sleep diagnostics
 
 After waking, `/diag` reports `deep_sleep_entries`, `deep_sleep_keypad_wakes`,
-`deep_sleep_timer_wakes`, `deep_sleep_errors`, and `deep_sleep_last_wake`
-(`none`, `keypad`, `timer`, or `other`). Counters survive deep sleep in RTC
-memory and reset on other kinds of boot. `off_sleep_mode` shows the active
-period's saved selection. Deep sleep has no periodic timer or test-key shortcut;
-R5C3 has no assigned action. If setup fails or a new key arrives before entry,
-the UI and network recover. Boot consumes the wake byte before normal input,
-including retries after a failed I2C read.
+`deep_sleep_timer_wakes`, `deep_sleep_dock_wakes`, `deep_sleep_undock_wakes`,
+`deep_sleep_errors`, and `deep_sleep_last_wake` (`none`, `keypad`, `dock`,
+`undock`, `timer`, or `other`). Counters survive deep sleep in RTC memory and
+reset on other kinds of boot. `off_sleep_mode` shows the active period's saved
+selection. Deep sleep has no periodic timer. The keypad wakes the
+normal view; docking wakes Dim silently with LED feedback. Boot consumes the keypad wake
+byte before normal input, including retries after a failed I2C read.
 
 ### Adjusting values
 
@@ -666,5 +732,13 @@ python3 tools/test_connected_power.py
 python3 tools/test_idle_io.py
 python3 tools/test_off_sleep.py
 python3 tools/test_deep_sleep.py
+python3 tools/test_dock_wake.py
+python3 tools/test_dock_led_task.py
+g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
+  tools/test_dock_led_animation.cpp -o /tmp/m5-dock-led-test
+/tmp/m5-dock-led-test
+g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
+  tools/test_dock_input.cpp -o /tmp/m5-dock-input-test
+/tmp/m5-dock-input-test
 python3 tools/test_sleep_config.py
 ```
