@@ -279,28 +279,70 @@ The IRQ pin follows the Calculator3's `G35_INT` net in its
 
 ## GPIO26 dock detection
 
-The base now includes a **PC817C optocoupler**. Its reported signal replaces the
-earlier contact-to-ground indication: **GPIO26 LOW means the base is powered
-and battery charging power is available**. A physically seated remote on an
-unpowered base does not count as powered/docked.
+The dock uses a **PC817C optocoupler** to signal when dock power is present.
+The original **C contact** carries this signal to GPIO26. A physically seated
+remote on an unpowered base does not count as powered/docked.
+
+| Contact | Factory function | Modified function |
+| --- | --- | --- |
+| G | Ground | Ground, unchanged |
+| 5 | Dock 5V | Power and charging supply, unchanged |
+| D | SDA / GPIO21 | Unchanged |
+| C | SCL / GPIO22 | Repurposed as the GPIO26 sensing contact |
+
+Factory connections are documented in the
+[Bottom3 schematic](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1273/A168_Faces_Bottom3_Sche.pdf).
+
+### Dock side
+
+The intended optocoupler connections are:
+
+```text
+Dock 5V -- series resistor -- PC817C LED input
+Dock GND ------------------- PC817C LED return
+
+PC817C collector -- dock C contact
+PC817C emitter   -- dock GND
+```
+
+PC817 pin functions are **1: anode, 2: cathode, 3: emitter, 4: collector**.
+See the [Sharp datasheet](https://global.sharp/products/device/lineup/data/pdf/datasheet/PC817XxNSZ1B_e.pdf).
+The resistor value and taped-over optocoupler connections are not readable
+in the photos, so those remain unconfirmed.
+
+### Bottom3 side
+
+Under the battery, **only the C conductor of the G–5–D–C ribbon cable is cut**.
+This isolates the dock's C contact from its original GPIO22/SCL connection.
+
+An added wire connects the **contact side of C to GPIO26** on the lower board.
+The shared I2C clock connection between the Core, keypad, and PMIC remains intact.
+
+```text
+Dock C contact
+      |
+Bottom3 C contact -- added wire -- GPIO26
+      |
+      X  C ribbon conductor cut under battery
+      |
+Original GPIO22 / SCL connection
+```
+
+GPIO26 uses its internal pull-up:
+
+- **Powered dock connected:** the optocoupler pulls GPIO26 LOW
+- **Dock disconnected or unpowered:** GPIO26 reads HIGH
+
+The earlier direct **G–C test jumper** is replaced by the optocoupler output.
+Port B's **O** signal is also GPIO26. The dock's power and common ground
+connections remain in use; only the C dock-contact branch is repurposed.
+
+### Firmware behavior
 
 | GPIO26 level | Meaning |
 | --- | --- |
 | LOW | PC817C indicates base power; battery charging power is available |
 | HIGH | No base-power signal; this does not rule out separate Core USB charging |
-
-- **Cradle/base:** the PC817C supplies the active-low SENSE indication
-- **Bottom3:** the matching SENSE contact is isolated from its original connection
-  and wired to **GPIO26 on the lower PCB**
-- Firmware configures GPIO26 with the Core's internal pull-up and retains the
-  existing 50 ms debounce. No firmware polarity change is required
-
-The outer contact was described as pin 1 or 4 depending on viewing direction;
-identify SENSE by continuity rather than assuming a physical pin number. On the
-lower PCB schematic, G26 is **J2 pin 7 / FPC1 pin 14**. Port B's **O** signal is
-also GPIO26. The main I2C bus remains connected to the keypad and PMIC; only the
-selected dock-contact branch is repurposed. The dock's power and common ground
-connections remain in use. See the [Bottom3 schematic](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1273/A168_Faces_Bottom3_Sche.pdf).
 
 A stable LOW for 50 ms triggers the red-to-yellow-to-green LED animation without sound.
 A stable HIGH re-arms detection and wakes
