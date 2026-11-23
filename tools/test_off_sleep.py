@@ -114,6 +114,7 @@ static int dockInputLevel(){return 1;}
 AppConfig g_config;
 static bool g_scheduleNight=false;
 static std::atomic<bool> g_commandLedActive{false};
+static std::atomic<bool> g_lowBatteryLedPending{false};
 static bool g_keypadIrqAvailable=true,g_keypadIrqVerified=false,g_keypadIrqFault=false;
 static constexpr int KEYPAD_IRQ_PIN=35,KEYPAD_IRQ_HEALTH_MS=1000,FALLING=2,LOW=0;
 static uint8_t g_wakeOnlyButtons=0;
@@ -141,6 +142,7 @@ int main(){
     busy=true;offSleepTick();busy=false;work=true;offSleepTick();work=false;
     g_audioQuiet=false;offSleepTick();g_audioQuiet=true;
     g_commandLedActive=true;offSleepTick();g_commandLedActive=false;
+    g_lowBatteryLedPending=true;offSleepTick();g_lowBatteryLedPending=false;
     assert(sleepCalls==0 && !net);
     netOk=false;offSleepTick();assert(sleepCalls==0);netOk=true;
     // Timer wakes keep both Wi-Fi and LCD off; never consume an action.

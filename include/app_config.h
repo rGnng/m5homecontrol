@@ -33,6 +33,7 @@ struct AppConfig {
     uint8_t entityCount = GRID_SLOTS;
     uint8_t brightness = 30;
     uint8_t theme = 0;  // 0 = flipper, 1 = classic
+    bool lowBatteryWarning = true;
 
     uint16_t dayStart = 7 * 60;
     uint16_t dayEnd = 21 * 60;

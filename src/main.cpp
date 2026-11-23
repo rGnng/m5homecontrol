@@ -25,6 +25,7 @@
 #include "keypad_controls.h"
 #include "dock_input.h"
 #include "dock_led_animation.h"
+#include "low_battery_warning.h"
 #include "sfx_data.h"
 #include "ui_font.h"
 #include "ui_font_data.h"
@@ -321,6 +322,10 @@ static std::atomic<uint32_t> g_commandLedCount{0};
 static std::atomic<uint32_t> g_commandLedFrames{0};
 static std::atomic<uint16_t> g_commandLedPixels{0};
 static constexpr uint32_t DOCK_LED_EVENT = 1u << 24;
+static constexpr uint32_t LOW_BATTERY_LED_EVENT = 1u << 25;
+static std::atomic<bool> g_lowBatteryLedAllowed{false};
+static std::atomic<bool> g_lowBatteryLedPending{false};
+static std::atomic<uint32_t> g_lowBatteryLedCount{0};
 static std::atomic<uint32_t> g_dockLedCount{0}, g_dockLedFrames{0};
 static std::atomic<uint16_t> g_dockLedPixels{0};
 
@@ -335,8 +340,11 @@ static void commandLedTask(void*) {
         uint32_t frames = 0;
         uint16_t pixels = 0;
         g_commandLedActive.store(true);
+        g_lowBatteryLedPending.store(false);
         auto saveFrames = [&]() {
-            if (color & DOCK_LED_EVENT) {
+            if (color & LOW_BATTERY_LED_EVENT) {
+                // Warning frames do not replace HA or dock animation metrics.
+            } else if (color & DOCK_LED_EVENT) {
                 g_dockLedFrames.store(frames);
                 g_dockLedPixels.store(pixels);
             } else {
@@ -347,7 +355,10 @@ static void commandLedTask(void*) {
         for (;;) {
             uint32_t elapsed = millis() - startedAt;
             bool docking = color & DOCK_LED_EVENT;
-            if (elapsed >= (docking ? DOCK_LED_DURATION_MS : COMMAND_LED_DURATION_MS)) {
+            bool warning = color & LOW_BATTERY_LED_EVENT;
+            if (warning && !g_lowBatteryLedAllowed.load()) break;
+            if (elapsed >= (warning ? LOW_BATTERY_LED_DURATION_MS :
+                            (docking ? DOCK_LED_DURATION_MS : COMMAND_LED_DURATION_MS))) {
                 if (docking) {
                     auto rgb = dockLedColor(DOCK_LED_DURATION_MS);
                     M5.Led.setAllColor(rgb.red, rgb.green, rgb.blue);
@@ -356,7 +367,9 @@ static void commandLedTask(void*) {
                 }
                 break;
             }
-            if (docking) {
+            if (warning) {
+                M5.Led.setAllColor(lowBatteryLedRed(elapsed), 0, 0);
+            } else if (docking) {
                 auto rgb = dockLedColor(elapsed);
                 M5.Led.setAllColor(rgb.red, rgb.green, rgb.blue);
                 pixels = 1023;
@@ -387,8 +400,12 @@ static void commandLedTask(void*) {
             // Notification output can change even on timeout. Only accept a
             // new color when an actual command notification was received.
             uint32_t nextColor = 0;
-            if (xTaskNotifyWait(0, UINT32_MAX, &nextColor, pdMS_TO_TICKS(docking ? 10 : 20)) == pdTRUE) {
-                if (docking && !(nextColor & DOCK_LED_EVENT)) {
+            if (xTaskNotifyWait(0, UINT32_MAX, &nextColor, pdMS_TO_TICKS(docking || warning ? 10 : 20)) == pdTRUE) {
+                g_lowBatteryLedPending.store(false);
+                if (nextColor & LOW_BATTERY_LED_EVENT) {
+                    // A warning must not interrupt user feedback.
+                    continue;
+                } else if (docking && !(nextColor & DOCK_LED_EVENT)) {
                     // Finish docking feedback before the next HA sweep.
                     pendingColor = nextColor;
                     pending = true;
@@ -449,10 +466,14 @@ String commandLedsStatus() {
     text += " dock_leds_brightness_pct=" + String(DOCK_LED_BRIGHTNESS_PERCENT);
     text += " dock_leds_frames=" + String((unsigned long)g_dockLedFrames.load());
     text += " dock_leds_pixels=" + String((unsigned)g_dockLedPixels.load());
+    text += " low_battery_warning=" + String(g_config.lowBatteryWarning ? 1 : 0);
+    text += " low_battery_eligible=" + String(g_lowBatteryLedAllowed.load() ? 1 : 0);
+    text += " low_battery_warnings=" + String((unsigned long)g_lowBatteryLedCount.load());
     return text;
 }
 
 static void animateDockLeds() {
+    g_lowBatteryLedAllowed.store(false);
     if (!g_commandLedTask) return;
     g_dockLedCount.fetch_add(1);
     xTaskNotify(g_commandLedTask, DOCK_LED_EVENT, eSetValueWithOverwrite);
@@ -514,7 +535,7 @@ static void dockInputTick() {
     bool docking = g_dockInput.update(digitalRead(DOCK_INPUT_PIN) == LOW, millis());
     if (wasDocked != g_dockInput.docked()) {
         g_statusDockDirty = true;
-        Serial.printf("[dock] gpio26=%s\n", g_dockInput.docked() ? "docked" : "undocked");
+        Serial.printf("[dock] PC817C gpio26=%s\n", g_dockInput.docked() ? "base powered" : "base power absent");
     }
     if (docking) onDocked();
     else if (wasDocked && !g_dockInput.docked()) onUndocked();
@@ -522,8 +543,11 @@ static void dockInputTick() {
 
 String dockInputStatus() {
     return "dock_gpio_pin=" + String(g_dockInputAvailable ? DOCK_INPUT_PIN : -1) +
+           " dock_sensor=PC817C" +
            " dock_gpio_level=" + String(g_dockInputAvailable ? digitalRead(DOCK_INPUT_PIN) : -1) +
            " dock_detected=" + String(g_dockInputAvailable ? int(g_dockInput.docked()) : -1) +
+           " dock_powered=" + String(g_dockInputAvailable ? int(g_dockInput.docked()) : -1) +
+           " dock_charge_available=" + String(g_dockInputAvailable ? int(g_dockInput.docked()) : -1) +
            " dock_events=" + String(g_dockInput.dockingEvents()) +
            " undock_events=" + String(g_dockInput.undockingEvents());
 }
@@ -543,6 +567,20 @@ static void connectedPowerTick() {
                 && !M5.Speaker.isPlaying();
     setConnectedPowerIdle(idle);
     setPowerPollingIdle(idle);
+}
+
+static void lowBatteryWarningTick() {
+    static LowBatteryWarning warning;
+    PowerStatus power = readPowerStatus();
+    bool eligible = lowBatteryWarningEligible(g_config.lowBatteryWarning, dockConnected(),
+                                              power.batteryPercent);
+    g_lowBatteryLedAllowed.store(eligible);
+    if (warning.tick(eligible, g_commandLedTask && !g_commandLedActive.load() &&
+                     !g_lowBatteryLedPending.load(), millis())) {
+        g_lowBatteryLedCount.fetch_add(1);
+        g_lowBatteryLedPending.store(true);
+        xTaskNotify(g_commandLedTask, LOW_BATTERY_LED_EVENT, eSetValueWithOverwrite);
+    }
 }
 
 bool beginDisplayRead() {
@@ -1012,7 +1050,7 @@ static void drawBattery(LovyanGFX& g, int x, int y, int pct, bool charging,
     g.fillRect(x + 20, y + 4, 2, 5, mono);
 
     if (docked) {
-        // Physical dock contact; this does not establish charging/full status.
+        // PC817C detects base power and charging availability, not charge completion.
         g.fillRect(x + 6, y + 2, 2, 3, mono);
         g.fillRect(x + 10, y + 2, 2, 3, mono);
         g.fillRect(x + 5, y + 5, 8, 4, mono);
@@ -2505,7 +2543,7 @@ static void offSleepTick() {
         M5.getBoard() != m5::board_t::board_M5Stack || dockConnected()) return;
     // Let the Off response leave the socket and allow active work to drain.
     if (millis() - g_offStartedAt < 500 || haHttpBusy() || connectedPowerWorkActive() ||
-        g_commandLedActive.load() || !g_audioQuiet || dockInputPending()) return;
+        g_commandLedActive.load() || g_lowBatteryLedPending.load() || !g_audioQuiet || dockInputPending()) return;
     if (!networkSetSuspended(true)) return;
 
     bool keypadWake = g_keypadIrqAvailable && !g_keypadIrqFault;
@@ -2602,6 +2640,7 @@ void loop() {
         }
     }
 
+    lowBatteryWarningTick();
     offSleepTick();
     delay(connectedPowerIdle() ? 20 : 10);
 }

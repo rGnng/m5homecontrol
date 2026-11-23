@@ -124,6 +124,7 @@ void configLoad() {
     if (bright < 1 || bright > 100) bright = 30;
     g_config.brightness = (uint8_t)bright;
     g_config.theme = (uint8_t)constrain(p.getInt("theme", 0), 0, 1);
+    g_config.lowBatteryWarning = p.getInt("lowbat", 1) != 0;
 
     g_config.dayStart = constrain(p.getInt("ds", 7 * 60), 0, 1439);
     g_config.dayEnd = constrain(p.getInt("de", 21 * 60), 0, 1439);
@@ -174,6 +175,7 @@ bool configSave() {
     putIntKey("count", g_config.entityCount);
     putIntKey("bright", g_config.brightness);
     putIntKey("theme", g_config.theme);
+    putIntKey("lowbat", g_config.lowBatteryWarning ? 1 : 0);
 
     // Only persist existing slots. Empty slots are removed so the small NVS
     // partition does not fill with hundreds of empty keys.
@@ -346,13 +348,13 @@ static String powerSummary() {
     String text = "Battery: ";
     text += power.batteryPercent < 0 ? String("Unavailable")
                                     : String(power.batteryPercent) + "% (approximate)";
-    text += dockConnected() ? "\nDock: Docked" : "\nDock: Undocked";
+    text += dockConnected() ? "\nBase power: Present (charging available)" : "\nBase power: Not detected";
     return text;
 }
 
 static String dockIcon() {
-    return "<svg class=\"dock-icon\" role=\"img\" aria-label=\"Docked\" viewBox=\"0 0 24 24\" "
-           "xmlns=\"http://www.w3.org/2000/svg\"><title>Docked</title>"
+    return "<svg class=\"dock-icon\" role=\"img\" aria-label=\"Base powered; charging available\" viewBox=\"0 0 24 24\" "
+           "xmlns=\"http://www.w3.org/2000/svg\"><title>PC817C: base powered; charging available</title>"
            "<g fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\">"
            "<rect x=\"6\" y=\"2\" width=\"12\" height=\"14\" rx=\"1\"/>"
            "<path d=\"M3 13v8h18v-8M6 18h12M10 13h4\"/></g></svg>";
@@ -452,7 +454,12 @@ static void handleRoot() {
     page += "<span id=\"dock-status\" role=\"status\"" + String(dockConnected() ? "" : " hidden") + ">" +
             dockIcon() + "</span></div>";
     page += "<button type=\"button\" class=\"secondary\" onclick=\"refreshPower()\">Refresh</button>";
-    page += "</div></fieldset>";
+    page += "</div><label>Low battery warning</label><select name=\"lowbat\">";
+    page += "<option value=\"on\"" + String(g_config.lowBatteryWarning ? " selected" : "") + ">On</option>";
+    page += "<option value=\"off\"" + String(!g_config.lowBatteryWarning ? " selected" : "") + ">Off</option></select>";
+    page += "<p>When undocked and below 25%, the LEDs flash red twice every minute. "
+            "Runs while awake or in light sleep; deep sleep stays uninterrupted. "
+            "Unknown battery readings do not trigger a warning.</p></fieldset>";
 
     page += "<fieldset><legend>Display</legend>";
     page += "<label>Theme</label><select name=\"theme\">";
@@ -899,6 +906,10 @@ static void handleSave() {
     if (bright > 100) bright = 100;
     g_config.brightness = (uint8_t)bright;
     g_config.theme = server.arg("theme") == "classic" ? 1 : 0;
+    String lowBatteryArg = server.arg("lowbat");
+    if (lowBatteryArg == "on" || lowBatteryArg == "off") {
+        g_config.lowBatteryWarning = lowBatteryArg == "on";
+    }
 
     g_config.dayStart = parseTime(server.arg("dstart"), g_config.dayStart);
     g_config.dayEnd = parseTime(server.arg("dend"), g_config.dayEnd);

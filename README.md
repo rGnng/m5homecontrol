@@ -72,7 +72,7 @@ A Home Assistant remote for the **M5Stack Core Basic v2.7** (ESP32, 320x240).
 - The icon follows Wi-Fi and the authenticated HA WebSocket; a failed entity
   command does not change connection status
 - Confirmed Core USB charging: bolt inside the battery icon
-- Physically docked: plug inside the battery icon; charging/full status remains unknown
+- PC817C reports base power on GPIO26: plug inside the battery icon; charging power is available, but full status remains unknown
 - Unavailable battery reading while undocked: `?`
 - No clock, no battery percentage
 - The battery icon is monochrome, same color as the signal bars
@@ -110,8 +110,9 @@ animation readiness, brightness (0-255), duration, theme color, active state,
 trigger count, and the last sweep's frame count and visited-pixel mask
 (`1023` means all ten pixels).
 
-The on-screen battery icon shows a plug whenever the GPIO26 contact detects the
-dock, even when battery telemetry is available. Undocking removes the plug;
+The on-screen battery icon shows a plug whenever the PC817C pulls GPIO26 LOW,
+indicating that the base is powered and battery charging power is available,
+even when battery telemetry is available. Loss of that signal removes the plug;
 an unavailable battery reading shows `?`, never an empty battery. The screen's
 dock indication follows the 50 ms contact debounce independently of PMIC polling.
 Power is sampled every 500 ms while active and every 5 seconds while idle.
@@ -151,7 +152,7 @@ power to wake it.
 
 Docked telemetry may still become unavailable even with boost keep-on enabled.
 In the device test, battery handoff continued working and live readings returned
-after undocking. The screen's plug means physically docked, without confirming charging/full;
+after undocking. The screen's plug means base power and charging power are available, without confirming charging current or full status;
 `?` means no current battery reading and does not mean empty.
 
 Web -> **Power** shows a battery icon; **Refresh** updates its fill level.
@@ -165,11 +166,29 @@ It also reports `dock_inferred`, `pmic_online`, `core_keep_on`, `core_boost_enab
 `core_charge_enabled`, `core_battery_handoff`, and `power_recoveries`.
 The Bottom3 TP4057's `CHRG` and `STDBY` pins are unconnected in the
 [manufacturer schematic](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1273/A168_Faces_Bottom3_Sche.pdf),
-so actual dock charging detection requires a hardware status connection.
+so the added PC817C reports base power and charging availability, rather than
+measuring charge current or the TP4057's charging/full state.
+
+### Low battery warning
+
+Web **Power → Low battery warning** enables or disables the warning; it is on
+by default and saved with **Save and reboot**. While undocked with a known
+battery level strictly below 25%, all ten LEDs flash red twice as soon as the
+LEDs are free, then repeat at one-minute intervals. Each flash lasts 80 ms
+with an 80 ms gap, at 15% LED brightness
+independent of the display. Docking, disabling the setting, an unknown reading,
+or a reading of 25% or higher suppresses the warning. User command and dock
+animations take priority.
+
+The Core Basic gauge reports only 0%, 25%, 50%, 75%, or 100%, so its lowest
+0% bucket triggers this strict threshold. Warnings work in Normal, Dim, and
+Off/light sleep without waking the screen or reconnecting Wi-Fi. Deep sleep
+remains uninterrupted; there are no added timer wakes. `/diag` reports
+`low_battery_warning`, `low_battery_eligible`, and `low_battery_warnings`.
 
 ### Connected power saving
 
-While physically docked, the ESP32 stays awake at its active CPU speed with
+While the PC817C reports base power, the ESP32 stays awake at its active CPU speed with
 Wi-Fi modem sleep disabled, HA connected, and live updates running. The display
 still follows the normal day/night Dim and Off schedule; only the LCD sleeps
 when the screen is Off. Web configuration, screenshots, and OTA remain reachable.
@@ -260,14 +279,21 @@ The IRQ pin follows the Calculator3's `G35_INT` net in its
 
 ## GPIO26 dock detection
 
-The internal rewiring is complete on this unit:
+The base now includes a **PC817C optocoupler**. Its reported signal replaces the
+earlier contact-to-ground indication: **GPIO26 LOW means the base is powered
+and battery charging power is available**. A physically seated remote on an
+unpowered base does not count as powered/docked.
 
-- **Cradle:** one outer contact, called **SENSE** here, is connected to ground
-- **Bottom3:** the matching contact is isolated from its original connection
+| GPIO26 level | Meaning |
+| --- | --- |
+| LOW | PC817C indicates base power; battery charging power is available |
+| HIGH | No base-power signal; this does not rule out separate Core USB charging |
+
+- **Cradle/base:** the PC817C supplies the active-low SENSE indication
+- **Bottom3:** the matching SENSE contact is isolated from its original connection
   and wired to **GPIO26 on the lower PCB**
-- GPIO26 uses the Core's internal pull-up; a grounded contact reads LOW when
-  docked, and the disconnected contact reads HIGH when undocked. No extra
-  resistor or 3.3V supply in the cradle is required
+- Firmware configures GPIO26 with the Core's internal pull-up and retains the
+  existing 50 ms debounce. No firmware polarity change is required
 
 The outer contact was described as pin 1 or 4 depending on viewing direction;
 identify SENSE by continuity rather than assuming a physical pin number. On the
@@ -286,8 +312,8 @@ the screen to Normal without playing a sound.
 | Dim | Dim; idle timers unchanged |
 | Off / light sleep / deep sleep | Wake directly into Dim |
 
-While docked, device sleep and HA disconnection are disabled, including when
-the screen is Off. Screen brightness and Dim/Off timing still follow the saved
+While the PC817C reports base power, device sleep and HA disconnection are
+disabled, including when the screen is Off. Screen brightness and Dim/Off timing still follow the saved
 schedule. Picking up from the dock always wakes the normal view; device power
 saving then follows the undocked policy.
 
@@ -295,15 +321,20 @@ The screen shows a plug inside the battery icon when docked, including while
 Dim. The web **Power** section shows a separate dock symbol beside the battery
 and checks dock state every two seconds while the page is visible.
 These checks read the debounced input and do not poll the charger or wake the
-display. Both indicators confirm physical contact, not charging or a full battery.
+display. Both indicators mean base power and charging power are available. They do not
+measure charge current or establish that the battery is full. The existing
+`dockConnected()` and `dock_detected` names refer to this powered-base state.
 
 When docking wakes a sleeping device, the active period's dim-to-off timeout
 starts again. Deep sleep retains the last day/night period until a fresh HA
-clock sample arrives. A contact held closed does not repeatedly trigger feedback.
+clock sample arrives. A held LOW from the PC817C does not repeatedly trigger feedback.
 An ordinary boot while already docked shows the icon without replaying the animation.
 
-`/diag` reports `dock_gpio_pin`, raw `dock_gpio_level`, debounced `dock_detected`,
-`dock_events`, `undock_events`, and `dock_leds_*` animation counters. PMIC dock
+`/diag` names the sensor with `dock_sensor=PC817C` and reports `dock_gpio_pin`,
+raw `dock_gpio_level`, debounced `dock_detected`, `dock_powered`,
+`dock_charge_available`, `dock_events`, `undock_events`, and `dock_leds_*`
+animation counters. Power/availability values are `1` for LOW, `0` for HIGH,
+and `-1` when GPIO sensing is unavailable. PMIC dock
 inference remains separate. For a bench test, connect Port B **G to O**; leave
 **V (5V)** alone. Disconnect USB and battery before modifying traces; grounding
 an SCL contact still connected to the original bus would stop I2C communication.
@@ -417,6 +448,7 @@ new entity-list downloads; an already cached selector can still be served.
 Fields:
 
 - Theme: `Flipper` (default) or `Classic`
+- Power: Low battery warning, on by default; double red flashes below 25% while undocked
 - Fallback brightness, 1-100%, default 30%
 - Day/night normal/dim brightness, dim/off timeouts, and live Wake/Dim/Off previews
 - Dynamic page blocks: title + eight slots
@@ -734,6 +766,9 @@ python3 tools/test_off_sleep.py
 python3 tools/test_deep_sleep.py
 python3 tools/test_dock_wake.py
 python3 tools/test_dock_led_task.py
+g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
+  tools/test_low_battery_warning.cpp -o /tmp/m5-low-battery-test
+/tmp/m5-low-battery-test
 g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
   tools/test_dock_led_animation.cpp -o /tmp/m5-dock-led-test
 /tmp/m5-dock-led-test

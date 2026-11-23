@@ -10,6 +10,7 @@ start = source.index('static constexpr uint32_t COMMAND_LED_DURATION_MS')
 end = source.index('static void initCommandLeds()',start)
 prefix = r'''
 #include "dock_led_animation.h"
+#include "low_battery_warning.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -91,7 +92,26 @@ int main(){
         }
     }
     assert(darkStart && red && now==390 && g_dockLedPixels==1023);
-    puts("PASS: real ten-LED task, 15% peak with fade in/out, exact duration, queued HA sweep and dock preemption");
+    // Low-battery warnings use both strips, even with the display brightness at zero.
+    g_lowBatteryLedAllowed=true;g_commandLedBrightness=0;
+    run({{0,LOW_BATTERY_LED_EVENT}});
+    for(const auto& frame:frames){
+        auto expected=(frame.at<80 || (frame.at>=160 && frame.at<240))?0x260000u:0u;
+        for(auto p:frame.pixels)assert(p==expected);
+    }
+    assert(now==240);
+    // Docking or disabling an already-queued warning suppresses it completely.
+    g_lowBatteryLedAllowed=false;run({{0,LOW_BATTERY_LED_EVENT}});
+    assert(now==0 && frames.size()==1);
+    // User feedback can interrupt a warning; an extra warning never interrupts docking.
+    g_lowBatteryLedAllowed=true;g_commandLedBrightness=255;
+    run({{0,LOW_BATTERY_LED_EVENT},{30,DOCK_LED_EVENT}});
+    assert(now==380 && g_dockLedPixels==1023);
+    run({{0,DOCK_LED_EVENT},{30,LOW_BATTERY_LED_EVENT}});
+    assert(now==350 && g_dockLedPixels==1023);
+    run({{0,LOW_BATTERY_LED_EVENT},{30,0x0000ff}});
+    assert(now==330 && g_commandLedPixels==1023);
+    puts("PASS: real ten-LED task, docking fade, low-battery double flash, suppression, exact duration and feedback priority");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='m5-dock-leds-') as directory:

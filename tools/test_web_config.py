@@ -90,7 +90,7 @@ int main(){
     testPower.batteryPercent=100;
     assert(powerIcon().find("Battery: 100%")!=String::npos);
     assert(powerIcon().find("width=\"32\"")!=String::npos);
-    assert(dockIcon().find("aria-label=\"Docked\"")!=String::npos);
+    assert(dockIcon().find("aria-label=\"Base powered; charging available\"")!=String::npos);
     testPower.batteryPercent=75;
     g_config.ssid="test";g_config.hostname="test-remote";g_config.haUrl="http://ha";g_config.haToken="test";
     for(int p=0;p<MAX_PAGES;++p)g_config.pageTitles[p]="Room & lights";
@@ -104,6 +104,7 @@ int main(){
         server=WebServer{};serviced=0;g_config.pageCount=pages;g_config.entityCount=pages*GRID_SLOTS;
         g_config.daySleepMode=pages==3?SleepMode::Light:SleepMode::Deep;
         g_config.nightSleepMode=pages==3?SleepMode::Deep:SleepMode::Light;
+        g_config.lowBatteryWarning=pages!=3;
         handleRoot();
         if(optionsComplete){
             auto complete=std::move(optionsComplete);optionsComplete=nullptr;
@@ -119,6 +120,11 @@ int main(){
         assert(html.find(testDock?"id=\"dock-status\" role=\"status\">":"id=\"dock-status\" role=\"status\" hidden>")!=std::string::npos);
         assert(html.find("fetch('/dock'")!=std::string::npos);
         assert(html.find("new FormData(form)")!=std::string::npos);
+        auto power=html.substr(html.find("<legend>Power</legend>"));
+        power=power.substr(0,power.find("</fieldset>"));
+        auto lowbat=power.find("name=\"lowbat\">");assert(lowbat!=std::string::npos);
+        auto options=power.substr(lowbat,power.find("</select>",lowbat)-lowbat);
+        assert(options.find(g_config.lowBatteryWarning?"value=\"on\" selected":"value=\"off\" selected")!=std::string::npos);
         for(const char* period:{"d","n"}){
             const bool deep=String(period)=="d"?g_config.daySleepMode==SleepMode::Deep:g_config.nightSleepMode==SleepMode::Deep;
             auto select=html.find(std::string("name=\"")+period+"sleep\">");

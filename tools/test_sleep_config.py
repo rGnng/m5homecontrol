@@ -81,6 +81,7 @@ int main(){
     ints={{"dd",300},{"do",0},{"nd",60},{"no",3600}};
     strings={{"ssid","test"},{"token","saved-secret"}};
     reload();timers();assert(g_config.daySleepMode==SleepMode::Light && g_config.nightSleepMode==SleepMode::Light);
+    assert(g_config.lowBatteryWarning); // Existing configurations enable the new warning by default.
     form();handleSave();assert(server.status==200 && ESP.reboots==1);
     assert(ints["dsm"]==1 && ints["nsm"]==0);
     reload();timers();assert(g_config.daySleepMode==SleepMode::Deep && g_config.nightSleepMode==SleepMode::Light);
@@ -96,6 +97,12 @@ int main(){
     // Corrupt/unrecognized NVS values default to the established Light behavior.
     ints["dsm"]=-1;ints["nsm"]=2;reload();timers();
     assert(g_config.daySleepMode==SleepMode::Light && g_config.nightSleepMode==SleepMode::Light);
+    form();server.args["lowbat"]="off";handleSave();reload();
+    assert(!g_config.lowBatteryWarning && ints["lowbat"]==0);
+    form();handleSave();reload();assert(!g_config.lowBatteryWarning); // Older forms preserve the choice.
+    form();server.args["lowbat"]="invalid";handleSave();reload();assert(!g_config.lowBatteryWarning);
+    form();server.args["lowbat"]="on";handleSave();reload();
+    assert(g_config.lowBatteryWarning && ints["lowbat"]==1);
     std::puts("PASS: actual web save/NVS roundtrip, independent sleep modes, old forms, invalid values, preserved timers and credentials");
 }
 '''
