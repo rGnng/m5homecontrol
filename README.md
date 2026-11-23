@@ -298,7 +298,7 @@ Factory connections are documented in the
 The intended optocoupler connections are:
 
 ```text
-Dock 5V -- series resistor -- PC817C LED input
+Dock 5V -- 910 Ω resistor -- PC817C LED input
 Dock GND ------------------- PC817C LED return
 
 PC817C collector -- dock C contact
@@ -307,8 +307,8 @@ PC817C emitter   -- dock GND
 
 PC817 pin functions are **1: anode, 2: cathode, 3: emitter, 4: collector**.
 See the [Sharp datasheet](https://global.sharp/products/device/lineup/data/pdf/datasheet/PC817XxNSZ1B_e.pdf).
-The resistor value and taped-over optocoupler connections are not readable
-in the photos, so those remain unconfirmed.
+The series resistor is **910 Ω**, confirmed by the builder. The taped-over
+optocoupler connections are not readable in the photos, so those remain unconfirmed.
 
 ### Bottom3 side
 
