@@ -25,7 +25,8 @@ int main() {
     uint32_t lastInput = UINT32_MAX - 1000;
     uint32_t now = lastInput + 600000;
     assert(night(now - lastInput).phase == BacklightPhase::Dim);
-    // Neither a schedule transition nor missing clock data may wake a screen.
+    // The default guard prevents clock changes from waking a screen. The
+    // scheduler's docked morning exception is tested in test_idle_io.py.
     BacklightPlan normal = {BacklightPhase::Normal, 30};
     BacklightPlan dim = {BacklightPhase::Dim, 1};
     BacklightPlan off = {BacklightPhase::Off, 0};

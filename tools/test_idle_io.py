@@ -74,6 +74,8 @@ static int g_backlightOverride=-1;
 static BacklightPhase g_backlightPhase=BacklightPhase::Normal;
 static bool g_resumeDeepSleep=false;
 static bool g_dockDimTimeout=false;
+static bool docked=false;
+bool dockConnected(){return docked;}
 static uint8_t g_backlightPercent=30;
 static void applyBacklightPlan(BacklightPlan plan){++applies;g_backlightPhase=plan.phase;g_backlightPercent=plan.brightness;}
 static void scheduleTick(bool explicitInput=false);
@@ -91,6 +93,7 @@ static void resetKeypad(){
 static void key(uint8_t raw,bool signal=true){rawKey=raw;if(signal){irqPin=LOW;if(interruptHandler)interruptHandler();}}
 static void resetSchedule(uint32_t base=0){
     now=base;g_config=AppConfig{};g_config.dayBrightness=20;g_config.dayDimBrightness=3;
+    docked=false;g_dockDimTimeout=g_resumeDeepSleep=false;
     g_config.nightBrightness=10;g_config.nightDimBrightness=1;
     g_lastActivity=base;g_backlightOverride=-1;g_backlightPhase=BacklightPhase::Normal;g_backlightPercent=30;
     clockAvailable=true;clockHour=12;clockMinute=0;timeConversions=applies=0;
@@ -229,6 +232,58 @@ int main(){
     setDisplayMode("dim");now=1999;scheduleTick();assert(g_backlightPhase==BacklightPhase::Dim);
     now=2000;scheduleTick();assert(g_backlightPhase==BacklightPhase::Off);
     noteActivity();assert(!g_dockDimTimeout && !g_resumeDeepSleep);
+    // The two starts partition every minute, including schedules crossing midnight.
+    for (int day : {0, 420, 1260, 1439}) for (int night : {0, 1, 420, 1260}) {
+        if (day==night) continue;
+        int dayMinutes=0;
+        for (int minute=0;minute<1440;++minute) {
+            bool isDay=inTimeRange(minute,day,night);
+            bool isNight=inTimeRange(minute,night,day);
+            assert(isDay!=isNight);dayMinutes+=isDay;
+        }
+        assert(dayMinutes==(night-day+1440)%1440);
+    }
+    auto beforeMorning=[](bool onDock, bool dimEnabled, BacklightPhase phase){
+        resetSchedule();docked=onDock;clockHour=6;clockMinute=59;
+        g_config.dayDimSeconds=dimEnabled?300:0;g_config.dayOffSeconds=0;
+        scheduleTick();g_backlightPhase=phase;g_backlightPercent=phase==BacklightPhase::Off?0:1;
+        g_backlightOverride=phase==BacklightPhase::Off?2:1;
+        g_lastActivity=0;g_dimStartedAt=0;
+        clockHour=7;clockMinute=0;now=1000;
+    };
+    beforeMorning(true,true,BacklightPhase::Off);scheduleTick();
+    assert(g_backlightPhase==BacklightPhase::Dim && g_backlightPercent==3 && g_dimStartedAt==1000);
+    assert(g_lastActivity==1000 && g_backlightOverride==1);
+    now=4000;scheduleTick();assert(g_backlightPhase==BacklightPhase::Dim && g_dimStartedAt==1000);
+    setDisplayMode("off");now=5000;scheduleTick();assert(g_backlightPhase==BacklightPhase::Off); // One transition, not a repeated wake.
+    beforeMorning(true,false,BacklightPhase::Off);scheduleTick();
+    assert(g_backlightPhase==BacklightPhase::Normal && g_backlightPercent==20 && g_backlightOverride==-1);
+    now=3600000;scheduleTick();assert(g_backlightPhase==BacklightPhase::Normal);
+    for (bool dimEnabled : {false,true}) {
+        beforeMorning(true,dimEnabled,BacklightPhase::Off);g_config.dayOffSeconds=2;scheduleTick();
+        assert(g_backlightPhase==BacklightPhase::Off && g_backlightOverride==2 && g_lastActivity==0);
+    }
+    beforeMorning(true,true,BacklightPhase::Dim);g_config.dayOffSeconds=2;scheduleTick();
+    assert(g_backlightPhase==BacklightPhase::Dim && g_backlightPercent==1 && g_dimStartedAt==0 && g_lastActivity==0);
+    now=2000;scheduleTick();assert(g_backlightPhase==BacklightPhase::Off);
+    beforeMorning(true,true,BacklightPhase::Dim);scheduleTick();
+    assert(g_backlightPhase==BacklightPhase::Dim && g_backlightPercent==3 && g_dimStartedAt==1000);
+    beforeMorning(false,false,BacklightPhase::Off);scheduleTick();assert(g_backlightPhase==BacklightPhase::Off);
+    beforeMorning(false,true,BacklightPhase::Off);scheduleTick();assert(g_backlightPhase==BacklightPhase::Off);
+    beforeMorning(true,true,BacklightPhase::Off);noteActivity();
+    assert(g_backlightPhase==BacklightPhase::Normal); // Explicit input wins over morning Dim.
+    beforeMorning(true,true,BacklightPhase::Off);g_config.dayBrightness=0;scheduleTick();
+    assert(g_backlightPhase==BacklightPhase::Off); // An explicitly disabled daytime display stays off.
+    beforeMorning(true,true,BacklightPhase::Off);g_backlightPhase=BacklightPhase::Normal;
+    g_backlightPercent=10;g_backlightOverride=-1;scheduleTick();assert(g_backlightPhase==BacklightPhase::Normal);
+    // First clock acquisition during Day is not a morning edge, including retained deep-sleep Night.
+    resetSchedule();docked=true;clockAvailable=false;g_scheduleNight=true;setDisplayMode("off");
+    clockAvailable=true;now=1000;scheduleTick();assert(g_backlightPhase==BacklightPhase::Off);
+    // Midnight can be either boundary; waking follows Day starts, not a fixed clock hour.
+    resetSchedule();docked=true;g_config.dayStart=0;g_config.nightStart=12*60;
+    clockHour=23;clockMinute=59;setDisplayMode("off");
+    clockHour=0;clockMinute=0;now=1000;scheduleTick();assert(g_backlightPhase==BacklightPhase::Normal);
+    std::puts("PASS: full-day coverage, docked morning Dim/Normal, Off-timer priority, one-shot wake, input priority, midnight and first-clock protection");
     std::puts("PASS: actual second clock cache, skipped background work, exact idle deadlines, immediate input/web wake, first time sync, day/night, disabled timers and rollover");
 }
 '''

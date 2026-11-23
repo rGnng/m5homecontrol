@@ -741,6 +741,7 @@ static void applyBacklightPlan(BacklightPlan plan) {
 
 static void scheduleTick(bool explicitInput) {
     uint32_t now = millis();
+    bool morningWake = false;
     bool clockAvailable = haClockReady();
     bool refreshClock = !g_scheduleStarted ||
         clockAvailable != g_scheduleObservedClock ||
@@ -749,13 +750,16 @@ static void scheduleTick(bool explicitInput) {
 
     if (refreshClock) {
         struct tm timeinfo;
+        bool hadClock = g_scheduleClockReady;
+        bool wasNight = g_scheduleNight;
         g_scheduleObservedClock = clockAvailable;
         g_scheduleClockReady = haGetLocalTime(timeinfo);
         if (g_scheduleClockReady) {
             int minute = timeinfo.tm_hour * 60 + timeinfo.tm_min;
-            bool isDay = inTimeRange(minute, g_config.dayStart, g_config.dayEnd);
-            bool isNight = inTimeRange(minute, g_config.nightStart, g_config.nightEnd);
-            g_scheduleNight = !isDay && isNight;
+            g_scheduleNight = !inTimeRange(minute, g_config.dayStart, g_config.nightStart);
+            morningWake = hadClock && wasNight && !g_scheduleNight && dockConnected() &&
+                          !explicitInput && g_backlightPhase != BacklightPhase::Normal &&
+                          g_config.dayBrightness > 0 && g_config.dayOffSeconds == 0;
         }
         g_scheduleClockCheckedAt = now;
         ++g_backlightClockChecks;
@@ -764,6 +768,12 @@ static void scheduleTick(bool explicitInput) {
     ++g_backlightChecks;
     bool clockReady = g_scheduleClockReady;
     bool night = g_scheduleNight;
+    if (morningWake) {
+        g_resumeDeepSleep = g_dockDimTimeout = false;
+        g_lastActivity = now;
+        g_backlightOverride = g_config.dayDimSeconds ? (int)BacklightPhase::Dim : -1;
+        g_dimStartedAt = now;
+    }
     uint8_t brightness = clockReady ? (night ? g_config.nightBrightness : g_config.dayBrightness)
                                     : g_config.brightness;
     uint8_t dimBrightness = night ? g_config.nightDimBrightness : g_config.dayDimBrightness;
@@ -782,7 +792,7 @@ static void scheduleTick(bool explicitInput) {
     } else if (g_backlightOverride == (int)BacklightPhase::Off) {
         plan = {BacklightPhase::Off, 0};
     }
-    if (!explicitInput) {
+    if (!explicitInput && !morningWake) {
         plan = limitAutomaticBacklight(plan, {g_backlightPhase, g_backlightPercent});
     }
     if (plan.phase != g_backlightPhase) {

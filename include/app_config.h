@@ -36,7 +36,6 @@ struct AppConfig {
     bool lowBatteryWarning = true;
 
     uint16_t dayStart = 7 * 60;
-    uint16_t dayEnd = 21 * 60;
     uint8_t dayBrightness = 5;
     uint8_t dayDimBrightness = 1;
     uint16_t dayDimSeconds = 0;
@@ -44,7 +43,6 @@ struct AppConfig {
     SleepMode daySleepMode = SleepMode::Light;
 
     uint16_t nightStart = 21 * 60;
-    uint16_t nightEnd = 7 * 60;
     uint8_t nightBrightness = 5;
     uint8_t nightDimBrightness = 1;
     uint16_t nightDimSeconds = 600;

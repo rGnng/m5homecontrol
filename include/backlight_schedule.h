@@ -23,8 +23,8 @@ inline BacklightPlan planBacklight(uint32_t idleMillis, uint8_t brightness,
     return {BacklightPhase::Normal, brightness};
 }
 
-// Background scheduling may darken the display, but only explicit input may
-// brighten it. This also covers day/night changes and loss of network time.
+// Background scheduling may darken the display. Callers bypass this guard for
+// explicit input and the docked morning wake; clock availability alone cannot wake it.
 inline BacklightPlan limitAutomaticBacklight(BacklightPlan next, BacklightPlan previous) {
     if (previous.phase == BacklightPhase::Off) return {BacklightPhase::Off, 0};
     if (previous.phase == BacklightPhase::Dim && next.phase != BacklightPhase::Off) {

@@ -390,6 +390,9 @@ an SCL contact still connected to the original bus would stop I2C communication.
 
 Configure **Display** in the web page. Schedule times follow
 [Home Assistant's local time](#home-assistant-time).
+Set **Day starts** and **Night starts**; each period ends when the other starts.
+The times must differ. Existing start times are preserved; old independent end
+times are ignored.
 
 | Default period | Local hours | Normal brightness | Idle before dim | Dim brightness | Time in dim before off |
 | --- | --- | --- | --- | --- | --- |
@@ -399,6 +402,11 @@ Configure **Display** in the web page. Schedule times follow
 The night defaults turn the display off after 12 minutes without input. The form
 uses seconds: 600 before dim and another 120 before off. Set a timeout to `0` to
 disable it. If dimming is disabled, the off timeout counts from the last input.
+
+At **Day starts**, a docked Off or Dim display wakes only if Day's **Off after dim**
+is disabled (`0`): to Dim if **Dim after** is enabled, otherwise Normal.
+A Normal display stays Normal; 0% Day brightness keeps the screen dark.
+Initial clock sync does not trigger this wake.
 
 Each day/night period has an **Off sleep mode** selection in web configuration:
 **Light sleep** resumes the current view; **Deep sleep** stays asleep until a

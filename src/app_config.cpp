@@ -129,7 +129,6 @@ void configLoad() {
     g_config.lowBatteryWarning = p.getInt("lowbat", 1) != 0;
 
     g_config.dayStart = constrain(p.getInt("ds", 7 * 60), 0, 1439);
-    g_config.dayEnd = constrain(p.getInt("de", 21 * 60), 0, 1439);
     g_config.dayBrightness = constrain(p.getInt("db", 5), 0, 100);
     g_config.dayDimBrightness = constrain(p.getInt("ddb", 1), 1, 100);
     g_config.dayDimSeconds = constrain(p.getInt("dd", 0), 0, 3600);
@@ -137,7 +136,9 @@ void configLoad() {
     g_config.daySleepMode = p.getInt("dsm", 0) == 1 ? SleepMode::Deep : SleepMode::Light;
 
     g_config.nightStart = constrain(p.getInt("ns", 21 * 60), 0, 1439);
-    g_config.nightEnd = constrain(p.getInt("ne", 7 * 60), 0, 1439);
+    // Start times are the two shared boundaries; old independent ends are ignored.
+    if (g_config.nightStart == g_config.dayStart)
+        g_config.nightStart = (g_config.dayStart + 12 * 60) % (24 * 60);
     g_config.nightBrightness = constrain(p.getInt("nb", 5), 0, 100);
     g_config.nightDimBrightness = constrain(p.getInt("ndb", 1), 1, 100);
     // Migrate the old single off timer. Preserve a custom nonzero timeout;
@@ -152,6 +153,8 @@ void configLoad() {
 }
 
 bool configSave() {
+    if (g_config.dayStart >= 1440 || g_config.nightStart >= 1440 ||
+        g_config.dayStart == g_config.nightStart) return false;
     normalizeAuxEntities();
     Preferences p;
     if (!p.begin(NVS_NAMESPACE, false)) return false;
@@ -204,14 +207,14 @@ bool configSave() {
     }
 
     putIntKey("ds", g_config.dayStart);
-    putIntKey("de", g_config.dayEnd);
     putIntKey("db", g_config.dayBrightness);
     putIntKey("ddb", g_config.dayDimBrightness);
     putIntKey("dd", g_config.dayDimSeconds);
     putIntKey("do", g_config.dayOffSeconds);
     putIntKey("dsm", static_cast<int>(g_config.daySleepMode));
     putIntKey("ns", g_config.nightStart);
-    putIntKey("ne", g_config.nightEnd);
+    if (p.isKey("de")) p.remove("de");
+    if (p.isKey("ne")) p.remove("ne");
     putIntKey("nb", g_config.nightBrightness);
     putIntKey("ndb", g_config.nightDimBrightness);
     putIntKey("nd", g_config.nightDimSeconds);
@@ -257,10 +260,11 @@ static String formatTime(int minutes) {
 }
 
 static int parseTime(const String& value, int fallback) {
-    int colon = value.indexOf(':');
-    if (colon < 0) return fallback;
-    int hh = value.substring(0, colon).toInt();
-    int mm = value.substring(colon + 1).toInt();
+    if (value.length() != 5 || value[2] != ':') return fallback;
+    for (int i : {0, 1, 3, 4})
+        if (value[i] < '0' || value[i] > '9') return fallback;
+    int hh = (value[0] - '0') * 10 + value[1] - '0';
+    int mm = (value[3] - '0') * 10 + value[4] - '0';
     if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return fallback;
     return hh * 60 + mm;
 }
@@ -471,18 +475,18 @@ static void handleRoot() {
     page += "<label>Fallback brightness (%)</label><input name=\"bright\" type=\"number\" min=\"1\" max=\"100\" value=\"" +
             String(g_config.brightness) + "\">";
     page += "<div class=\"pagehead\">Display &amp; Sleep Schedule</div>";
-    auto scheduleRow = [&](const char* label, const char* prefix, uint16_t start, uint16_t end,
+    page += "<div class=\"schedule-line schedule-times\">";
+    page += "<label>Day starts<input id=\"dstart\" name=\"dstart\" type=\"time\" required value=\"" + formatTime(g_config.dayStart) + "\"></label>";
+    page += "<label>Night starts<input id=\"nstart\" name=\"nstart\" type=\"time\" required value=\"" + formatTime(g_config.nightStart) + "\"></label></div>";
+    auto scheduleRow = [&](const char* label, const char* prefix,
                            uint8_t brightness, uint8_t dimBrightness, uint16_t dim, uint16_t off,
                            SleepMode sleepMode) {
         page += "<div class=\"schedule-period\"><div class=\"schedule-title\">" + String(label) + "</div>";
-        page += "<div class=\"schedule-line schedule-times\">";
-        page += "<label>Start<input name=\"" + String(prefix) + "start\" type=\"time\" value=\"" + formatTime(start) + "\"></label>";
-        page += "<label>End<input name=\"" + String(prefix) + "end\" type=\"time\" value=\"" + formatTime(end) + "\"></label>";
         auto number = [&](const char* title, const char* suffix, unsigned value, unsigned min, unsigned max) {
             page += "<label>" + String(title) + "<input name=\"" + String(prefix) + suffix + "\" type=\"number\" min=\"" +
                     String(min) + "\" max=\"" + String(max) + "\" value=\"" + String(value) + "\"></label>";
         };
-        page += "</div><div class=\"schedule-line\">";
+        page += "<div class=\"schedule-line\">";
         number("Brightness %", "bright", brightness, 0, 100);
         number("Dim %", "dimbright", dimBrightness, 1, 100);
         number("Dim after (s)", "dim", dim, 0, 3600);
@@ -493,9 +497,9 @@ static void handleRoot() {
         page += "</select></label>";
         page += "</div></div>";
     };
-    scheduleRow("Day", "d", g_config.dayStart, g_config.dayEnd, g_config.dayBrightness,
+    scheduleRow("Day", "d", g_config.dayBrightness,
                 g_config.dayDimBrightness, g_config.dayDimSeconds, g_config.dayOffSeconds, g_config.daySleepMode);
-    scheduleRow("Night", "n", g_config.nightStart, g_config.nightEnd, g_config.nightBrightness,
+    scheduleRow("Night", "n", g_config.nightBrightness,
                 g_config.nightDimBrightness, g_config.nightDimSeconds, g_config.nightOffSeconds, g_config.nightSleepMode);
     page += "<p>0 = disabled. Without dimming, Off counts from last input.</p>";
     page += "<div class=\"pagehead\">Preview display</div>";
@@ -821,9 +825,18 @@ document.getElementById('connection-modal').addEventListener('click', function(e
 document.addEventListener('keydown', function(event) {
   if (event.key === 'Escape') closeConnection();
 });
+function validateSchedule() {
+  const day = document.getElementById('dstart');
+  const night = document.getElementById('nstart');
+  night.setCustomValidity(day.value && day.value === night.value ? 'Choose different Day and Night start times.' : '');
+}
+['dstart', 'nstart'].forEach(id => document.getElementById(id).addEventListener('input', validateSchedule));
+validateSchedule();
 document.querySelector('form[action="/save"]').addEventListener('submit', function(event) {
   event.preventDefault();
   const form = this;
+  validateSchedule();
+  if (!form.reportValidity()) return;
   const status = document.getElementById('save-status');
   const buttons = form.querySelectorAll('button[type="submit"]');
   buttons.forEach(function(button) { button.disabled = true; });
@@ -883,6 +896,16 @@ static void handleSave() {
         sendSaveError("Home Assistant URL is required.");
         return;
     }
+    int dayStart = server.hasArg("dstart") ? parseTime(server.arg("dstart"), -1) : g_config.dayStart;
+    int nightStart = server.hasArg("nstart") ? parseTime(server.arg("nstart"), -1) : g_config.nightStart;
+    if (dayStart < 0 || nightStart < 0) {
+        sendSaveError("Choose valid Day and Night start times.");
+        return;
+    }
+    if (dayStart == nightStart) {
+        sendSaveError("Choose different Day and Night start times.");
+        return;
+    }
     if (!url.startsWith("http://") && !url.startsWith("https://")) {
         url = "http://" + url;
     }
@@ -906,16 +929,14 @@ static void handleSave() {
         g_config.lowBatteryWarning = lowBatteryArg == "on";
     }
 
-    g_config.dayStart = parseTime(server.arg("dstart"), g_config.dayStart);
-    g_config.dayEnd = parseTime(server.arg("dend"), g_config.dayEnd);
+    g_config.dayStart = dayStart;
     g_config.dayBrightness = constrain(server.arg("dbright").toInt(), 0, 100);
     if (server.hasArg("ddimbright")) g_config.dayDimBrightness = constrain(server.arg("ddimbright").toInt(), 1, 100);
     if (server.hasArg("ddim")) g_config.dayDimSeconds = constrain(server.arg("ddim").toInt(), 0, 3600);
     g_config.dayOffSeconds = constrain(server.arg("doff").toInt(), 0, 3600);
     g_config.daySleepMode = parseSleepMode(server.arg("dsleep"), g_config.daySleepMode);
 
-    g_config.nightStart = parseTime(server.arg("nstart"), g_config.nightStart);
-    g_config.nightEnd = parseTime(server.arg("nend"), g_config.nightEnd);
+    g_config.nightStart = nightStart;
     g_config.nightBrightness = constrain(server.arg("nbright").toInt(), 0, 100);
     if (server.hasArg("ndimbright")) g_config.nightDimBrightness = constrain(server.arg("ndimbright").toInt(), 1, 100);
     if (server.hasArg("ndim")) g_config.nightDimSeconds = constrain(server.arg("ndim").toInt(), 0, 3600);
@@ -1472,12 +1493,12 @@ static void printConfig() {
     Serial.printf("[cfg] fallback brightness=%u%%\n", g_config.brightness);
     Serial.printf("[cfg] day %s-%s bright=%u%% dim=%u%% after=%us off=%us later\n",
                   formatTime(g_config.dayStart).c_str(),
-                  formatTime(g_config.dayEnd).c_str(),
+                  formatTime(g_config.nightStart).c_str(),
                   g_config.dayBrightness, g_config.dayDimBrightness,
                   g_config.dayDimSeconds, g_config.dayOffSeconds);
     Serial.printf("[cfg] night %s-%s bright=%u%% dim=%u%% after=%us off=%us later\n",
                   formatTime(g_config.nightStart).c_str(),
-                  formatTime(g_config.nightEnd).c_str(),
+                  formatTime(g_config.dayStart).c_str(),
                   g_config.nightBrightness, g_config.nightDimBrightness,
                   g_config.nightDimSeconds, g_config.nightOffSeconds);
     Serial.printf("[cfg] pages=%u\n", g_config.pageCount);

@@ -3,6 +3,7 @@
 import ast
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +42,7 @@ void endConnectedPowerWork(){}
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
+#include <fstream>
 #include <string>
 #include <vector>
 template<class T>static T constrain(T value,T low,T high){return std::min(high,std::max(low,value));}
@@ -79,7 +81,7 @@ static HaOptionsCallback optionsComplete;
 bool haFetchEntityOptions(HaOptionsCallback complete,int){optionsComplete=complete;return true;}
 '''
 tests = r'''
-int main(){
+int main(int argc,char** argv){
     // An unavailable reading must not look like a genuinely empty battery.
     testPower.batteryPercent=-1;
     assert(powerIcon().find("Battery status unavailable")!=String::npos);
@@ -115,6 +117,10 @@ int main(){
         assert(html.find("<script>")!=std::string::npos && html.find("</script>")!=std::string::npos);
         assert(html.find("const MAX_PAGES = 12;")!=std::string::npos);
         assert(html.find("const SLOTS = 8;")!=std::string::npos);
+        assert(html.find("<label>Day starts<input id=\"dstart\" name=\"dstart\" type=\"time\" required")!=std::string::npos);
+        assert(html.find("<label>Night starts<input id=\"nstart\" name=\"nstart\" type=\"time\" required")!=std::string::npos);
+        assert(html.find("name=\"dend\"")==std::string::npos && html.find("name=\"nend\"")==std::string::npos);
+        assert(html.find("function validateSchedule()")!=std::string::npos && html.find("form.reportValidity()")!=std::string::npos);
         assert(html.find("function movePage(")!=std::string::npos);
         assert(html.find("function openConnection(")!=std::string::npos);
         assert(html.find(testDock?"id=\"dock-status\" role=\"status\">":"id=\"dock-status\" role=\"status\" hidden>")!=std::string::npos);
@@ -137,6 +143,7 @@ int main(){
         const std::string lastField="name=\"e"+std::to_string(pages*GRID_SLOTS-1)+"\"";
         assert(html.find(lastField)!=std::string::npos);
         if(pages==MAX_PAGES)assert(html.size()>100000);
+        if(pages==MAX_PAGES && argc==2)std::ofstream(argv[1])<<html;
     }
     // A literal much larger than any permitted String still streams intact.
     server=WebServer{};server.headers=true;std::string literal(64000,'x');
@@ -154,4 +161,4 @@ with tempfile.TemporaryDirectory(prefix='m5-web-config-') as directory:
     (tmp / 'test.cpp').write_text(prefix + source[source.index('static String g_cachedEntityOptions;'):source.index('static void refreshEntityOptions(')] + ''.join(function(s) for s in signatures) + tests)
     subprocess.run(['g++', '-std=c++17', '-O2', '-Wall', '-Wextra', '-Werror', f'-I{tmp}',
                     f'-I{ROOT/"include"}', str(tmp / 'test.cpp'), '-o', str(tmp / 'test')], check=True)
-    subprocess.run([str(tmp / 'test')], check=True)
+    subprocess.run([str(tmp / 'test'), *sys.argv[1:]], check=True)

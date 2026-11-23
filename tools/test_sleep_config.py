@@ -60,7 +60,8 @@ struct Server{
     bool hasArg(const String& key){return args.count(key);}
     void send(int code,const char*,const String&){status=code;}
 }server;
-static void sendSaveError(const String&){assert(false);}
+static int saveErrors=0;
+static void sendSaveError(const String&){++saveErrors;server.status=400;}
 static String htmlHeader(const String&){return "";}
 static String htmlFooter(){return "";}
 static void delay(int){}
@@ -103,6 +104,28 @@ int main(){
     form();server.args["lowbat"]="invalid";handleSave();reload();assert(!g_config.lowBatteryWarning);
     form();server.args["lowbat"]="on";handleSave();reload();
     assert(g_config.lowBatteryWarning && ints["lowbat"]==1);
+    // Legacy ends no longer create gaps or overlaps: only the two starts survive.
+    ints["ds"]=420;ints["ns"]=1260;ints["de"]=1200;ints["ne"]=480;
+    reload();assert(g_config.dayStart==420 && g_config.nightStart==1260);
+    assert(configSave() && !ints.count("de") && !ints.count("ne"));
+    ints["ds"]=100;ints["ns"]=100;reload();
+    assert(g_config.dayStart==100 && g_config.nightStart==820);
+    assert(configSave());
+    // Browser bypass cannot persist an invalid/equal schedule or partially change config.
+    for (const char* invalid : {"07:00", "", "24:00", "12:60", "xx:30", "7:00", "07:00x"}) {
+        form();server.args["nstart"]=invalid;server.args["ssid"]="must-not-apply";
+        const auto savedInts=ints;const auto savedStrings=strings;
+        const String ssid=g_config.ssid;const int boots=ESP.reboots,errors=saveErrors;
+        handleSave();assert(server.status==400 && saveErrors==errors+1 && ESP.reboots==boots);
+        assert(ints==savedInts && strings==savedStrings && g_config.ssid==ssid);
+    }
+    form();server.args["dstart"]="23:00";server.args["nstart"]="06:00";
+    handleSave();reload();assert(g_config.dayStart==1380 && g_config.nightStart==360);
+    form();server.args.erase("dstart");server.args.erase("nstart");handleSave();reload();
+    assert(g_config.dayStart==1380 && g_config.nightStart==360);
+    g_config.nightStart=g_config.dayStart;assert(!configSave());reload();
+    assert(g_config.dayStart!=g_config.nightStart);
+    std::puts("PASS: linked start times, legacy gap/equal-time migration, validation before mutation, overnight schedules and missing-field preservation");
     std::puts("PASS: actual web save/NVS roundtrip, independent sleep modes, old forms, invalid values, preserved timers and credentials");
 }
 '''
