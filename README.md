@@ -411,6 +411,7 @@ A Normal display stays Normal; 0% Day brightness keeps the screen dark.
 Initial clock sync does not trigger this wake.
 
 **Power → Battery saving** has one shared battery-only plan, independent of Day/Night:
+the label sits above a single row, **Screen off → minutes → Light sleep → minutes → Deep sleep**.
 
 | Setting | Default | Starts counting from |
 | --- | --- | --- |

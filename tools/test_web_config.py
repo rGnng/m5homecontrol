@@ -134,10 +134,12 @@ int main(int argc,char** argv){
         assert(html.find("Fallback brightness")==std::string::npos && html.find("name=\"bright\"")==std::string::npos);
         assert(html.find("name=\"dsleep\"")==std::string::npos && html.find("name=\"nsleep\"")==std::string::npos);
         assert(html.find("Sleep(On battery)")==std::string::npos);
-        auto sleep=power.find("<div class=\"pagehead\">Battery saving</div>");assert(sleep!=std::string::npos);
+        auto sleep=power.find("<label id=\"battery-saving-label\" for=\"lightsleep\">Battery saving</label>");assert(sleep!=std::string::npos);
         auto section=power.substr(sleep);
-        assert(section.find("Off &rarr; Light sleep (min)")!=std::string::npos);
-        assert(section.find("Light sleep &rarr; Deep sleep (min)")!=std::string::npos);
+        assert(section.find("class=\"battery-saving\" role=\"group\" aria-labelledby=\"battery-saving-label\"")!=std::string::npos);
+        assert(section.find("<span>Screen off</span>")!=std::string::npos);
+        assert(section.find("<span>Light sleep</span>")!=std::string::npos);
+        assert(section.find("<span>Deep sleep</span>")!=std::string::npos);
         for(const char* field:{"lightsleep","deepsleep"}){
             auto name=std::string("name=\"")+field+"\"";
             auto pos=section.find(name);assert(pos!=std::string::npos && section.find(name,pos+1)==std::string::npos);

@@ -314,6 +314,10 @@ static String htmlHeader(const String& title) {
     h += ".display-schedule{table-layout:fixed;margin-top:12px}.display-schedule th:first-child{width:44%;padding-right:8px}";
     h += ".display-schedule td{padding-left:8px}.display-schedule th,.display-schedule td{vertical-align:middle}";
     h += "input:disabled{opacity:.4}";
+    h += ".battery-saving{display:flex;align-items:center;gap:4px;white-space:nowrap;overflow-x:auto;font-size:12px}";
+    h += ".battery-saving input{flex:0 0 auto;width:5ch;padding:7px 2px;font-size:inherit;text-align:center;appearance:textfield}";
+    h += ".battery-saving input::-webkit-inner-spin-button,.battery-saving input::-webkit-outer-spin-button{appearance:none;margin:0}";
+    h += ".sleep-delay{display:inline-flex;align-items:center;gap:2px}";
     h += "label.inline{display:inline-flex;align-items:center;gap:4px;margin:0 10px 0 0;font-size:12px;color:#aaa}";
     h += "label.inline input{width:auto;height:auto;margin:0}";
     h += ".pagehead{font-weight:600;margin:18px 0 6px;color:#fff}";
@@ -333,7 +337,7 @@ static String htmlHeader(const String& title) {
     h += ".device-actions{margin:0}";
     h += ".save-status{color:#bbb;font-size:14px;margin:0 0 16px}.save-status:empty{display:none}";
     h += "@media(max-width:800px){.layout{grid-template-columns:1fr}}";
-    h += "@media(max-width:400px){.actions.top h1{font-size:20px}}";
+    h += "@media(max-width:400px){.actions.top h1{font-size:20px}.battery-saving{font-size:10.5px;gap:1px}.sleep-delay{gap:1px}}";
     h += "</style></head><body>";
     return h;
 }
@@ -464,9 +468,13 @@ static void handleRoot() {
     page += "<option value=\"on\"" + String(g_config.lowBatteryWarning ? " selected" : "") + ">On</option>";
     page += "<option value=\"off\"" + String(!g_config.lowBatteryWarning ? " selected" : "") + ">Off</option></select>";
     page += "<p>Below 25% and undocked: two red flashes per minute.</p>";
-    page += "<div class=\"pagehead\">Battery saving</div>";
-    page += "<label>Off &rarr; Light sleep (min)<input name=\"lightsleep\" type=\"number\" min=\"0\" max=\"1440\" step=\"1\" required value=\"" + String(g_config.lightSleepMinutes) + "\"></label>";
-    page += "<label>Light sleep &rarr; Deep sleep (min)<input name=\"deepsleep\" type=\"number\" min=\"0\" max=\"1440\" step=\"1\" required value=\"" + String(g_config.deepSleepMinutes) + "\"></label>";
+    page += "<label id=\"battery-saving-label\" for=\"lightsleep\">Battery saving</label>";
+    page += "<div class=\"battery-saving\" role=\"group\" aria-labelledby=\"battery-saving-label\">";
+    page += "<span>Screen off</span><span aria-hidden=\"true\">&rarr;</span>";
+    page += "<span class=\"sleep-delay\"><input id=\"lightsleep\" name=\"lightsleep\" aria-label=\"Screen off to light sleep, minutes\" type=\"number\" min=\"0\" max=\"1440\" step=\"1\" required value=\"" + String(g_config.lightSleepMinutes) + "\"><span>min</span></span>";
+    page += "<span aria-hidden=\"true\">&rarr;</span><span>Light sleep</span><span aria-hidden=\"true\">&rarr;</span>";
+    page += "<span class=\"sleep-delay\"><input id=\"deepsleep\" name=\"deepsleep\" aria-label=\"Light sleep to deep sleep, minutes\" type=\"number\" min=\"0\" max=\"1440\" step=\"1\" required value=\"" + String(g_config.deepSleepMinutes) + "\"><span>min</span></span>";
+    page += "<span aria-hidden=\"true\">&rarr;</span><span>Deep sleep</span></div>";
     page += "<p>0 = disabled</p></fieldset>";
 
     page += "<fieldset><legend>Display</legend>";
