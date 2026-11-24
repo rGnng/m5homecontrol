@@ -54,6 +54,8 @@ inline int esp_sleep_get_wakeup_cause(){return wakeCause;}
 '''
 hardware_tests = r'''
 #include "off_sleep.h"
+#include "sleep_sequence.h"
+#include "power_status.h"
 #include <esp_sleep.h>
 #include <cstdio>
 static void clean(){
@@ -107,6 +109,8 @@ int main(){
 '''
 integration_prefix = r'''
 #include "backlight_schedule.h"
+#include "sleep_sequence.h"
+#include "power_status.h"
 #include "app_config.h"
 #include "deep_sleep.h"
 #include "off_sleep.h"
@@ -121,6 +125,10 @@ static bool busy=false,work=false,g_audioQuiet=true,net=false,netOk=true;
 static int deepCalls=0;
 bool enterDeepSleep(int,bool){++deepCalls;return false;}
 static bool g_resumeDeepSleep=false,dockPending=false;
+static SleepSequence g_sleepSequence;
+static PowerStatus power;
+static bool usbOnRefresh=false;
+PowerStatus readPowerStatus(bool force){if(force && usbOnRefresh)power.coreInput=1;return power;}
 static bool isDocked=false;
 bool dockConnected(){return isDocked;}
 static bool dockInputPending(){return dockPending;}
@@ -138,6 +146,7 @@ static OffWake result=OffWake::Timer;
 static bool haHttpBusy(){return busy;}
 static bool connectedPowerWorkActive(){return work;}
 bool networkSetSuspended(bool value){if(!netOk)return false;net=value;return true;}
+bool networkSuspended(){return net;}
 static int digitalRead(int pin){return pin==pressedPin?LOW:1;}
 static int digitalPinToInterrupt(int pin){return pin;}
 static void keypadInterrupt(){}
@@ -145,54 +154,93 @@ static void detachInterrupt(int pin){assert(pin==35);++detaches;}
 static void attachInterrupt(int pin,void(*handler)(),int mode){assert(pin==35 && handler==keypadInterrupt && mode==FALLING);++attaches;}
 static char keypadPoll(){assert(now-g_lastKeyPoll>=1000);++polls;return 'D';}
 static void noteActivity(){++wakes;net=false;g_backlightPhase=BacklightPhase::Normal;}
-OffWake sleepWhileOff(bool keypad,uint32_t ms,int dock){assert(dock==1);assert(net && !busy && !work);assert(keypad==(g_keypadIrqAvailable && !g_keypadIrqFault));++sleepCalls;sleepMs=ms;return result;}
+OffWake sleepWhileOff(bool keypad,uint32_t ms,int dock){assert(dock==1);assert(net && !busy && !work);assert(keypad==(g_keypadIrqAvailable && !g_keypadIrqFault));++sleepCalls;sleepMs=ms;if(result==OffWake::Timer)now+=ms;return result;}
 '''
 integration_tests = r'''
+static void reset(){
+    now=0;g_offStartedAt=0;g_sleepSequence.reset();g_config=AppConfig{};
+    g_backlightPhase=BacklightPhase::Off;g_resumeDeepSleep=dockPending=isDocked=false;
+    busy=work=net=false;g_audioQuiet=netOk=true;power=PowerStatus{};power.coreInput=0;
+    usbOnRefresh=false;
+    g_keypadIrqAvailable=true;g_keypadIrqVerified=g_keypadIrqFault=false;
+    pressedPin=-1;detaches=attaches=polls=wakes=sleepCalls=deepCalls=0;
+    g_commandLedActive=g_lowBatteryLedPending=false;g_wakeOnlyButtons=0;
+    result=OffWake::Timer;M5.board=m5::board_t::board_M5Stack;g_scheduleNight=false;
+}
 int main(){
-    // Normal/Dim, early Off, active HTTP/OTA, sound and LEDs may not sleep.
-    for(auto phase:{BacklightPhase::Normal,BacklightPhase::Dim}){g_backlightPhase=phase;offSleepTick();}
-    g_backlightPhase=BacklightPhase::Off;now=499;offSleepTick();now=10000;
-    isDocked=true;offSleepTick();assert(sleepCalls==0 && deepCalls==0);isDocked=false;
+    reset();now=59999;offSleepTick();assert(sleepCalls==0 && !net);
+    now=60000;offSleepTick();assert(sleepCalls==1 && sleepMs==1000 && now==61000 && net);
+    assert(g_sleepSequence.lightStarted() && wakes==0 && polls==0 && detaches==attaches);
+    // Deep sleep starts from actual Light entry, not from screen Off. A short
+    // final timer reaches the exact deadline instead of oversleeping a health poll.
+    g_keypadIrqVerified=true;now=1860000-250;offSleepTick();
+    assert(now==1860000 && sleepMs==250 && deepCalls==0);
+    offSleepTick();assert(deepCalls==1 && !net && wakes==1 && polls==1);
+    offSleepTick();assert(!g_sleepSequence.lightStarted());
+    // Disabled Light blocks the whole chain; disabled Deep permits indefinite Light.
+    reset();g_config.lightSleepMinutes=0;now=86400000;offSleepTick();assert(!net && sleepCalls==0 && deepCalls==0);
+    reset();g_config.deepSleepMinutes=0;now=60000;offSleepTick();now=86400000;offSleepTick();
+    assert(sleepCalls==2 && deepCalls==0 && net);
+    // USB power and unknown readings cannot enter sleep. If detected on a
+    // timer wake, restore web access without waking the display.
+    for(int input:{-1,1}){
+        reset();power.coreInput=input;now=60000;offSleepTick();assert(sleepCalls==0 && deepCalls==0 && !net);
+        g_sleepSequence.screenOff(0);g_sleepSequence.startLight(0);net=true;
+        offSleepTick();assert(!net && !g_sleepSequence.lightStarted() && g_backlightPhase==BacklightPhase::Off);
+    }
+    reset();isDocked=true;now=60000;offSleepTick();assert(sleepCalls==0 && deepCalls==0 && !net);
+    reset();usbOnRefresh=true;now=60000;offSleepTick();assert(sleepCalls==0 && deepCalls==0 && !net);
+    reset();now=60000;offSleepTick();usbOnRefresh=true;now=1860000;offSleepTick();
+    assert(deepCalls==0 && !net && !g_sleepSequence.lightStarted());
+    // Every existing transfer/audio/LED guard still delays entry. No deep
+    // countdown runs while a transfer holds the device awake.
+    reset();now=60000;
     busy=true;offSleepTick();busy=false;work=true;offSleepTick();work=false;
     g_audioQuiet=false;offSleepTick();g_audioQuiet=true;
     g_commandLedActive=true;offSleepTick();g_commandLedActive=false;
     g_lowBatteryLedPending=true;offSleepTick();g_lowBatteryLedPending=false;
-    assert(sleepCalls==0 && !net);
-    netOk=false;offSleepTick();assert(sleepCalls==0);netOk=true;
-    // Timer wakes keep both Wi-Fi and LCD off; never consume an action.
-    offSleepTick();assert(sleepMs==1000 && net && wakes==0 && polls==0);
-    assert(detaches==1 && attaches==1 && g_backlightPhase==BacklightPhase::Off);
-    offSleepTick();assert(net && wakes==0 && sleepCalls==2);
-    g_keypadIrqVerified=true;offSleepTick();assert(sleepMs==60000 && net && wakes==0);
-    result=OffWake::Error;offSleepTick();assert(net && wakes==0 && detaches==attaches);
-    // Keypad input is consumed while Off, then resumes networking.
-    result=OffWake::Input;offSleepTick();assert(!net && wakes==1 && polls==1 && g_wakeOnlyButtons==0);
-    // A held Core button remains wake-only through its debounce/release.
-    g_backlightPhase=BacklightPhase::Off;pressedPin=38;offSleepTick();
-    assert(!net && wakes==2 && polls==2 && g_wakeOnlyButtons==2);
-    g_backlightPhase=BacklightPhase::Off;g_keypadIrqFault=true;result=OffWake::Timer;offSleepTick();
-    g_keypadIrqAvailable=false;offSleepTick();assert(detaches==attaches && sleepCalls==8);
-    M5.board=m5::board_t::other;offSleepTick();assert(sleepCalls==8);
-    // Each saved period selects Deep independently, without timer wake.
-    M5.board=m5::board_t::board_M5Stack;g_keypadIrqAvailable=true;
-    g_keypadIrqFault=false;g_config.daySleepMode=SleepMode::Deep;
-    g_backlightPhase=BacklightPhase::Off;offSleepTick();
-    assert(deepCalls==1 && !net);
-    g_scheduleNight=true;g_backlightPhase=BacklightPhase::Off;offSleepTick();
-    assert(deepCalls==1 && sleepCalls==9 && net); // Night remains Light.
-    g_config.nightSleepMode=SleepMode::Deep;offSleepTick();
-    assert(deepCalls==2 && !net);
-    // Missing/faulty keypad cannot leave the device stuck in scheduled deep sleep.
-    g_backlightPhase=BacklightPhase::Off;g_keypadIrqAvailable=false;offSleepTick();
-    assert(deepCalls==2 && sleepCalls==10 && net);
-    // A dock wake leaves display/network asleep until debounce selects Dim.
-    result=OffWake::DockChange;offSleepTick();assert(wakes==4 && net);
-    int sleepsBefore=sleepCalls;dockPending=true;offSleepTick();assert(sleepCalls==sleepsBefore);
-    dockPending=false;g_keypadIrqAvailable=true;g_config.daySleepMode=SleepMode::Light;
-    g_scheduleNight=false;g_resumeDeepSleep=true;offSleepTick();assert(deepCalls==3);
-    std::puts("PASS: actual Off orchestration, transfer/audio/LED guards, radio stop, timer-only suspension, fallback polling and wake-only input");
+    dockPending=true;offSleepTick();dockPending=false;
+    assert(!net && !g_sleepSequence.lightStarted() && sleepCalls==0);
+    netOk=false;offSleepTick();assert(!net && sleepCalls==0);netOk=true;
+    now=90000;offSleepTick();assert(g_sleepSequence.lightStarted());
+    now=1889999;assert(!g_sleepSequence.deepDue(now,30));
+    now=1890000;assert(g_sleepSequence.deepDue(now,30));
+    // Day/night changes do not restart the shared sleep plan.
+    reset();now=60000;offSleepTick();g_scheduleNight=true;now=100000;offSleepTick();
+    assert(!g_sleepSequence.deepDue(1859999,30) && g_sleepSequence.deepDue(1860000,30));
+    // Failed first Light entry does not count as time spent asleep.
+    reset();now=60000;result=OffWake::Error;offSleepTick();assert(!g_sleepSequence.lightStarted() && detaches==attaches);
+    now=70000;result=OffWake::Timer;offSleepTick();assert(!g_sleepSequence.deepDue(1860000,30));
+    assert(g_sleepSequence.deepDue(1870000,30));
+    // Missing/faulty keypad IRQ retains Light; it must never select unwakeable Deep.
+    for(bool missing:{false,true}){
+        reset();g_keypadIrqAvailable=!missing;g_keypadIrqFault=!missing;now=60000;offSleepTick();
+        now=1860000;offSleepTick();assert(deepCalls==0 && sleepCalls==2 && detaches==attaches);
+    }
+    // A key remains wake-only, including a held Core B button.
+    reset();now=60000;pressedPin=38;result=OffWake::Input;offSleepTick();
+    assert(!net && wakes==1 && polls==1 && g_wakeOnlyButtons==2 && !g_sleepSequence.lightStarted());
+    reset();now=60000;result=OffWake::DockChange;offSleepTick();assert(net && wakes==0);
+    dockPending=true;int calls=sleepCalls;offSleepTick();assert(sleepCalls==calls);
+    // Debounced ghost dock wakes can return to Deep without replaying the full chain.
+    reset();now=1000;g_resumeDeepSleep=true;offSleepTick();assert(deepCalls==1 && wakes==1);
+    // Normal/Dim and other boards never sleep; a new Off interval resets Light.
+    reset();now=60000;offSleepTick();g_backlightPhase=BacklightPhase::Dim;offSleepTick();assert(!g_sleepSequence.lightStarted());
+    g_backlightPhase=BacklightPhase::Normal;offSleepTick();M5.board=m5::board_t::other;
+    g_backlightPhase=BacklightPhase::Off;offSleepTick();assert(sleepCalls==1);
+    // Both deadlines survive millis rollover and support the maximum 24-hour delay.
+    reset();g_offStartedAt=UINT32_MAX-30000;now=g_offStartedAt+59999;offSleepTick();assert(sleepCalls==0);
+    now=g_offStartedAt+60000;offSleepTick();assert(sleepCalls==1);
+    uint32_t lightAt=now-1000;assert(!g_sleepSequence.deepDue(lightAt+1799999,30));
+    assert(g_sleepSequence.deepDue(lightAt+1800000,30));
+    SleepSequence sequence;sequence.screenOff(123);assert(!sequence.lightDue(123+86399999,1440));
+    assert(sequence.lightDue(123+86400000,1440));sequence.startLight(100);
+    assert(!sequence.deepDue(100+86399999,1440) && sequence.deepDue(100+86400000,1440));
+    sequence.screenOff(456);assert(!sequence.lightStarted());
+    puts("PASS: shared battery sequence, exact staged deadlines, disabled timers, USB/unknown/dock guards, busy work, failed entry, wake-only keys, deep fallback, midnight-independent plan and rollover");
 }
 '''
+
 source = (ROOT / 'src/main.cpp').read_text()
 start = source.index('static void offSleepTick() {')
 end = source.index('\nvoid loop()', start)

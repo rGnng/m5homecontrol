@@ -67,12 +67,6 @@ static void normalizeAuxEntities() {
     }
 }
 
-static SleepMode parseSleepMode(const String& value, SleepMode fallback) {
-    if (value == "deep") return SleepMode::Deep;
-    if (value == "light") return SleepMode::Light;
-    return fallback;
-}
-
 void configLoad() {
     Preferences p;
     p.begin(NVS_NAMESPACE, true);
@@ -122,18 +116,16 @@ void configLoad() {
             g_config.pageTitles[page] = "PAGE" + String(page + 1);
         }
     }
-    int bright = p.getInt("bright", 30);
-    if (bright < 1 || bright > 100) bright = 30;
-    g_config.brightness = (uint8_t)bright;
     g_config.theme = (uint8_t)constrain(p.getInt("theme", 0), 0, 1);
     g_config.lowBatteryWarning = p.getInt("lowbat", 1) != 0;
+    g_config.lightSleepMinutes = constrain(p.getInt("lsm", 1), 0, 1440);
+    g_config.deepSleepMinutes = constrain(p.getInt("dpm", 30), 0, 1440);
 
     g_config.dayStart = constrain(p.getInt("ds", 7 * 60), 0, 1439);
     g_config.dayBrightness = constrain(p.getInt("db", 5), 0, 100);
     g_config.dayDimBrightness = constrain(p.getInt("ddb", 1), 1, 100);
     g_config.dayDimSeconds = constrain(p.getInt("dd", 0), 0, 3600);
     g_config.dayOffSeconds = constrain(p.getInt("do", 0), 0, 3600);
-    g_config.daySleepMode = p.getInt("dsm", 0) == 1 ? SleepMode::Deep : SleepMode::Light;
 
     g_config.nightStart = constrain(p.getInt("ns", 21 * 60), 0, 1439);
     // Start times are the two shared boundaries; old independent ends are ignored.
@@ -147,14 +139,14 @@ void configLoad() {
     int legacyOff = constrain(p.getInt("no", 0), 0, 3600);
     g_config.nightDimSeconds = constrain(p.getInt("nd", legacyOff ? 0 : 600), 0, 3600);
     g_config.nightOffSeconds = hasDimSchedule ? legacyOff : (legacyOff ? legacyOff : 120);
-    g_config.nightSleepMode = p.getInt("nsm", 0) == 1 ? SleepMode::Deep : SleepMode::Light;
     p.end();
     normalizeAuxEntities();
 }
 
 bool configSave() {
     if (g_config.dayStart >= 1440 || g_config.nightStart >= 1440 ||
-        g_config.dayStart == g_config.nightStart) return false;
+        g_config.dayStart == g_config.nightStart ||
+        g_config.lightSleepMinutes > 1440 || g_config.deepSleepMinutes > 1440) return false;
     normalizeAuxEntities();
     Preferences p;
     if (!p.begin(NVS_NAMESPACE, false)) return false;
@@ -178,7 +170,10 @@ bool configSave() {
     putStringKey("token", g_config.haToken);
     putIntKey("pages", g_config.pageCount);
     putIntKey("count", g_config.entityCount);
-    putIntKey("bright", g_config.brightness);
+    putIntKey("lsm", g_config.lightSleepMinutes);
+    putIntKey("dpm", g_config.deepSleepMinutes);
+    for (const char* key : {"bright", "dsm", "nsm"})
+        if (p.isKey(key)) p.remove(key);
     putIntKey("theme", g_config.theme);
     putIntKey("lowbat", g_config.lowBatteryWarning ? 1 : 0);
 
@@ -211,7 +206,6 @@ bool configSave() {
     putIntKey("ddb", g_config.dayDimBrightness);
     putIntKey("dd", g_config.dayDimSeconds);
     putIntKey("do", g_config.dayOffSeconds);
-    putIntKey("dsm", static_cast<int>(g_config.daySleepMode));
     putIntKey("ns", g_config.nightStart);
     if (p.isKey("de")) p.remove("de");
     if (p.isKey("ne")) p.remove("ne");
@@ -219,7 +213,6 @@ bool configSave() {
     putIntKey("ndb", g_config.nightDimBrightness);
     putIntKey("nd", g_config.nightDimSeconds);
     putIntKey("no", g_config.nightOffSeconds);
-    putIntKey("nsm", static_cast<int>(g_config.nightSleepMode));
     p.end();
     return ok;
 }
@@ -269,6 +262,14 @@ static int parseTime(const String& value, int fallback) {
     return hh * 60 + mm;
 }
 
+static int parseSleepMinutes(const String& value) {
+    if (value.isEmpty() || value.length() > 4) return -1;
+    for (size_t i = 0; i < value.length(); ++i)
+        if (value[i] < '0' || value[i] > '9') return -1;
+    int minutes = value.toInt();
+    return minutes <= 1440 ? minutes : -1;
+}
+
 static String htmlHeader(const String& title) {
     String h;
     h.reserve(512);
@@ -308,12 +309,11 @@ static String htmlHeader(const String& title) {
     h += "th{text-align:left;font-size:12px;color:#888;font-weight:600;padding:4px 0}";
     h += ".modesrow td{padding:0 0 10px}.modelabel{font-size:12px;color:#888;margin-right:8px}";
     h += ".auxfields{display:grid;grid-template-columns:1fr 1fr;gap:8px}";
-    h += ".schedule-period{margin:12px 0 16px}.schedule-title{font-weight:600;color:#ddd}";
-    h += ".schedule-line{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:8px}";
-    h += ".schedule-times{grid-template-columns:repeat(2,minmax(0,1fr))}";
-    h += ".schedule-line label{min-width:0;margin:0;font-size:12px;display:flex;flex-direction:column;justify-content:flex-end}";
-    h += ".schedule-line input,.schedule-line select{min-width:0;margin-top:5px;padding:7px 5px}";
-    h += ".schedule-sleep{grid-column:1/-1}";
+    h += ".schedule-times{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:12px}";
+    h += ".schedule-times label{min-width:0;margin:0;font-size:12px}.schedule-times input{min-width:0;margin-top:5px;padding:7px 5px}";
+    h += ".display-schedule{table-layout:fixed;margin-top:12px}.display-schedule th:first-child{width:44%;padding-right:8px}";
+    h += ".display-schedule td{padding-left:8px}.display-schedule th,.display-schedule td{vertical-align:middle}";
+    h += "input:disabled{opacity:.4}";
     h += "label.inline{display:inline-flex;align-items:center;gap:4px;margin:0 10px 0 0;font-size:12px;color:#aaa}";
     h += "label.inline input{width:auto;height:auto;margin:0}";
     h += ".pagehead{font-weight:600;margin:18px 0 6px;color:#fff}";
@@ -472,42 +472,36 @@ static void handleRoot() {
     page += "<option value=\"classic\"" +
             String(g_config.theme == 1 ? " selected" : "") + ">Classic</option>";
     page += "</select>";
-    page += "<label>Fallback brightness (%)</label><input name=\"bright\" type=\"number\" min=\"1\" max=\"100\" value=\"" +
-            String(g_config.brightness) + "\">";
-    page += "<div class=\"pagehead\">Display &amp; Sleep Schedule</div>";
-    page += "<div class=\"schedule-line schedule-times\">";
+    page += "<div class=\"schedule-times\">";
     page += "<label>Day starts<input id=\"dstart\" name=\"dstart\" type=\"time\" required value=\"" + formatTime(g_config.dayStart) + "\"></label>";
     page += "<label>Night starts<input id=\"nstart\" name=\"nstart\" type=\"time\" required value=\"" + formatTime(g_config.nightStart) + "\"></label></div>";
-    auto scheduleRow = [&](const char* label, const char* prefix,
-                           uint8_t brightness, uint8_t dimBrightness, uint16_t dim, uint16_t off,
-                           SleepMode sleepMode) {
-        page += "<div class=\"schedule-period\"><div class=\"schedule-title\">" + String(label) + "</div>";
-        auto number = [&](const char* title, const char* suffix, unsigned value, unsigned min, unsigned max) {
-            page += "<label>" + String(title) + "<input name=\"" + String(prefix) + suffix + "\" type=\"number\" min=\"" +
-                    String(min) + "\" max=\"" + String(max) + "\" value=\"" + String(value) + "\"></label>";
+    page += "<table class=\"display-schedule\"><thead><tr><th></th><th scope=\"col\">Day</th><th scope=\"col\">Night</th></tr></thead><tbody>";
+    auto scheduleRow = [&](const char* label, const char* suffix, unsigned day, unsigned night, unsigned min, unsigned max) {
+        page += "<tr><th scope=\"row\">" + String(label) + "</th>";
+        auto number = [&](const char* period, const char* prefix, unsigned value) {
+            page += "<td><input aria-label=\"" + String(period) + " " + label + "\" name=\"" + prefix + suffix +
+                    "\" type=\"number\" min=\"" + String(min) + "\" max=\"" + String(max) + "\" value=\"" + String(value) + "\"></td>";
         };
-        page += "<div class=\"schedule-line\">";
-        number("Brightness %", "bright", brightness, 0, 100);
-        number("Dim %", "dimbright", dimBrightness, 1, 100);
-        number("Dim after (s)", "dim", dim, 0, 3600);
-        number("Off after dim (s)", "off", off, 0, 3600);
-        page += "<label class=\"schedule-sleep\">Off sleep mode<select name=\"" + String(prefix) + "sleep\">";
-        page += "<option value=\"light\"" + String(sleepMode == SleepMode::Light ? " selected" : "") + ">Light sleep</option>";
-        page += "<option value=\"deep\"" + String(sleepMode == SleepMode::Deep ? " selected" : "") + ">Deep sleep</option>";
-        page += "</select></label>";
-        page += "</div></div>";
+        number("Day", "d", day);
+        number("Night", "n", night);
+        page += "</tr>";
     };
-    scheduleRow("Day", "d", g_config.dayBrightness,
-                g_config.dayDimBrightness, g_config.dayDimSeconds, g_config.dayOffSeconds, g_config.daySleepMode);
-    scheduleRow("Night", "n", g_config.nightBrightness,
-                g_config.nightDimBrightness, g_config.nightDimSeconds, g_config.nightOffSeconds, g_config.nightSleepMode);
-    page += "<p>0 = disabled. Without dimming, Off counts from last input.</p>";
+    scheduleRow("Brightness %", "bright", g_config.dayBrightness, g_config.nightBrightness, 0, 100);
+    scheduleRow("Dim brightness %", "dimbright", g_config.dayDimBrightness, g_config.nightDimBrightness, 1, 100);
+    scheduleRow("Dim after (s)", "dim", g_config.dayDimSeconds, g_config.nightDimSeconds, 0, 3600);
+    scheduleRow("Screen off after dim (s)", "off", g_config.dayOffSeconds, g_config.nightOffSeconds, 0, 3600);
+    page += "</tbody></table><p>0 = disabled</p>";
     page += "<div class=\"pagehead\">Preview display</div>";
     page += "<div class=\"actions display-preview\" role=\"group\" aria-label=\"Display preview\">"
             "<button type=\"button\" data-display-mode=\"wake\" aria-pressed=\"false\" onclick=\"previewDisplay('wake')\">Wake</button>"
             "<button type=\"button\" data-display-mode=\"dim\" aria-pressed=\"false\" onclick=\"previewDisplay('dim')\">Dim</button>"
             "<button type=\"button\" data-display-mode=\"off\" aria-pressed=\"false\" onclick=\"previewDisplay('off')\">Off</button></div>";
     page += "</fieldset>";
+
+    page += "<fieldset><legend>Sleep(On battery)</legend>";
+    page += "<label>Off &rarr; Light sleep (min)<input name=\"lightsleep\" type=\"number\" min=\"0\" max=\"1440\" step=\"1\" required value=\"" + String(g_config.lightSleepMinutes) + "\"></label>";
+    page += "<label>Light sleep &rarr; Deep sleep (min)<input name=\"deepsleep\" type=\"number\" min=\"0\" max=\"1440\" step=\"1\" required value=\"" + String(g_config.deepSleepMinutes) + "\"></label>";
+    page += "<p>0 = disabled</p></fieldset>";
 
     page += "<fieldset><legend>Device</legend>";
     page += "<div class=\"actions device-actions\">"
@@ -832,6 +826,12 @@ function validateSchedule() {
 }
 ['dstart', 'nstart'].forEach(id => document.getElementById(id).addEventListener('input', validateSchedule));
 validateSchedule();
+function updateSleepTimers() {
+  const light = document.querySelector('[name="lightsleep"]');
+  document.querySelector('[name="deepsleep"]').disabled = Number(light.value) === 0;
+}
+document.querySelector('[name="lightsleep"]').addEventListener('input', updateSleepTimers);
+updateSleepTimers();
 document.querySelector('form[action="/save"]').addEventListener('submit', function(event) {
   event.preventDefault();
   const form = this;
@@ -884,7 +884,6 @@ static void handleSave() {
     String hostname = sanitizeHostname(server.arg("host"));
     String url = server.arg("url");
     String token = server.arg("token");
-    String brightArg = server.arg("bright");
 
     ssid.trim();
     url.trim();
@@ -906,6 +905,12 @@ static void handleSave() {
         sendSaveError("Choose different Day and Night start times.");
         return;
     }
+    int lightMinutes = server.hasArg("lightsleep") ? parseSleepMinutes(server.arg("lightsleep")) : g_config.lightSleepMinutes;
+    int deepMinutes = server.hasArg("deepsleep") ? parseSleepMinutes(server.arg("deepsleep")) : g_config.deepSleepMinutes;
+    if (lightMinutes < 0 || deepMinutes < 0) {
+        sendSaveError("Sleep timers must be whole minutes from 0 to 1440.");
+        return;
+    }
     if (!url.startsWith("http://") && !url.startsWith("https://")) {
         url = "http://" + url;
     }
@@ -919,10 +924,8 @@ static void handleSave() {
     g_config.haUrl = url;
     if (!token.isEmpty()) g_config.haToken = token;
 
-    int bright = brightArg.toInt();
-    if (bright < 1) bright = 30;
-    if (bright > 100) bright = 100;
-    g_config.brightness = (uint8_t)bright;
+    g_config.lightSleepMinutes = lightMinutes;
+    g_config.deepSleepMinutes = deepMinutes;
     g_config.theme = server.arg("theme") == "classic" ? 1 : 0;
     String lowBatteryArg = server.arg("lowbat");
     if (lowBatteryArg == "on" || lowBatteryArg == "off") {
@@ -934,14 +937,12 @@ static void handleSave() {
     if (server.hasArg("ddimbright")) g_config.dayDimBrightness = constrain(server.arg("ddimbright").toInt(), 1, 100);
     if (server.hasArg("ddim")) g_config.dayDimSeconds = constrain(server.arg("ddim").toInt(), 0, 3600);
     g_config.dayOffSeconds = constrain(server.arg("doff").toInt(), 0, 3600);
-    g_config.daySleepMode = parseSleepMode(server.arg("dsleep"), g_config.daySleepMode);
 
     g_config.nightStart = nightStart;
     g_config.nightBrightness = constrain(server.arg("nbright").toInt(), 0, 100);
     if (server.hasArg("ndimbright")) g_config.nightDimBrightness = constrain(server.arg("ndimbright").toInt(), 1, 100);
     if (server.hasArg("ndim")) g_config.nightDimSeconds = constrain(server.arg("ndim").toInt(), 0, 3600);
     g_config.nightOffSeconds = constrain(server.arg("noff").toInt(), 0, 3600);
-    g_config.nightSleepMode = parseSleepMode(server.arg("nsleep"), g_config.nightSleepMode);
 
     int pages = server.arg("pagecount").toInt();
     pages = constrain(pages, 1, MAX_PAGES);
@@ -995,9 +996,9 @@ static void handleSave() {
         }
     }
 
-    Serial.printf("[web] save pages=%d t0=%s e0=%s bright=%d\n",
+    Serial.printf("[web] save pages=%d t0=%s e0=%s\n",
                   pages, g_config.pageTitles[0].c_str(),
-                  g_config.entities[0].c_str(), bright);
+                  g_config.entities[0].c_str());
 
     if (!configSave()) {
         Serial.println("[web] NVS save FAILED");
@@ -1490,7 +1491,8 @@ static void printConfig() {
                                                     ? (g_config.haToken.substring(0, 4) + "..." +
                                                        g_config.haToken.substring(g_config.haToken.length() - 4)).c_str()
                                                     : "********"));
-    Serial.printf("[cfg] fallback brightness=%u%%\n", g_config.brightness);
+    Serial.printf("[cfg] battery sleep: off -> light %umin, light -> deep %umin\n",
+                  g_config.lightSleepMinutes, g_config.deepSleepMinutes);
     Serial.printf("[cfg] day %s-%s bright=%u%% dim=%u%% after=%us off=%us later\n",
                   formatTime(g_config.dayStart).c_str(),
                   formatTime(g_config.nightStart).c_str(),
@@ -1644,22 +1646,6 @@ void appConfigHandleCommand(const String& raw) {
         return;
     }
 
-    if (lower.startsWith("bright ")) {
-        int value = line.substring(7).toInt();
-        if (value < 1 || value > 100) {
-            Serial.println("[cfg] usage: :bright <1-100>");
-            return;
-        }
-        g_config.brightness = (uint8_t)value;
-        if (!configSave()) {
-            Serial.println("[cfg] NVS write failed");
-            return;
-        }
-        M5.Display.setBrightness((uint8_t)((value * 255 + 50) / 100));
-        Serial.printf("[cfg] brightness=%d%%\n", value);
-        return;
-    }
-
     if (lower.startsWith("title ")) {
         int sp = line.indexOf(' ');
         String rest = line.substring(sp + 1);
@@ -1716,7 +1702,6 @@ void appConfigHandleCommand(const String& raw) {
         Serial.printf("[cfg]   :entity <1-%d> <entity_id>\n", MAX_ENTITIES);
         Serial.printf("[cfg]   :name <1-%d> <display name>\n", MAX_ENTITIES);
         Serial.printf("[cfg]   :title <1-%d> <name>\n", MAX_PAGES);
-        Serial.println("[cfg]   :bright <1-100>");
         Serial.println("[cfg]   :show");
         Serial.println("[cfg]   :clear");
         Serial.println("[cfg]   :reboot");

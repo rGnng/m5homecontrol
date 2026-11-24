@@ -184,7 +184,7 @@ int main(){
     assert(timeConversions==1 && g_backlightClockChecks==1 && applies==50);
     scheduleTick();assert(timeConversions==2);
     // First HA time is immediate; subsequent day/night checks are second-spaced.
-    resetSchedule();clockAvailable=false;scheduleTick();assert(g_backlightPercent==30);
+    resetSchedule();clockAvailable=false;scheduleTick();assert(g_backlightPercent==20);
     now=10;clockAvailable=true;scheduleTick();assert(g_backlightPercent==20 && timeConversions==2);
     resetSchedule();clockHour=20;clockMinute=59;scheduleTick();
     now=999;clockHour=21;clockMinute=0;scheduleTick();assert(g_backlightPercent==20);

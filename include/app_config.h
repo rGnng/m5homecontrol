@@ -15,8 +15,6 @@ static constexpr uint8_t CLIMATE_DRY  = 1u << 2;
 static constexpr uint8_t CLIMATE_FAN  = 1u << 3;
 static constexpr uint8_t CLIMATE_AUTO = 1u << 4;
 
-enum class SleepMode : uint8_t { Light, Deep };
-
 struct AppConfig {
     String ssid;
     String pass;
@@ -31,23 +29,22 @@ struct AppConfig {
     String pageTitles[MAX_PAGES];
     uint8_t pageCount = 1;
     uint8_t entityCount = GRID_SLOTS;
-    uint8_t brightness = 30;
     uint8_t theme = 0;  // 0 = flipper, 1 = classic
     bool lowBatteryWarning = true;
+    uint16_t lightSleepMinutes = 1;
+    uint16_t deepSleepMinutes = 30;
 
     uint16_t dayStart = 7 * 60;
     uint8_t dayBrightness = 5;
     uint8_t dayDimBrightness = 1;
     uint16_t dayDimSeconds = 0;
     uint16_t dayOffSeconds = 0;
-    SleepMode daySleepMode = SleepMode::Light;
 
     uint16_t nightStart = 21 * 60;
     uint8_t nightBrightness = 5;
     uint8_t nightDimBrightness = 1;
     uint16_t nightDimSeconds = 600;
     uint16_t nightOffSeconds = 120;
-    SleepMode nightSleepMode = SleepMode::Light;
 };
 
 extern AppConfig g_config;

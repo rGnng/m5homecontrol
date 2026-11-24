@@ -22,6 +22,7 @@ def function(signature):
 prefix = r'''
 #include "dock_input.h"
 #include "deep_sleep.h"
+#include "sleep_sequence.h"
 #include "backlight_schedule.h"
 #include <cassert>
 #include <cstdio>

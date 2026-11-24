@@ -17,6 +17,7 @@
 #include "app_config.h"
 #include "connected_power.h"
 #include "off_sleep.h"
+#include "sleep_sequence.h"
 #include "deep_sleep.h"
 #include "backlight_schedule.h"
 #include "power_status.h"
@@ -512,6 +513,7 @@ static constexpr int DOCK_INPUT_PIN = 26;
 static bool g_dockInputAvailable = false;
 static DockInput g_dockInput;
 static bool g_resumeDeepSleep = false;
+static SleepSequence g_sleepSequence;
 static bool g_dockDimTimeout = false;
 static void onDocked();
 static void onUndocked();
@@ -775,7 +777,7 @@ static void scheduleTick(bool explicitInput) {
         g_dimStartedAt = now;
     }
     uint8_t brightness = clockReady ? (night ? g_config.nightBrightness : g_config.dayBrightness)
-                                    : g_config.brightness;
+                                    : g_config.dayBrightness;
     uint8_t dimBrightness = night ? g_config.nightDimBrightness : g_config.dayDimBrightness;
     BacklightPlan plan = {BacklightPhase::Normal, brightness};
     if (clockReady) {
@@ -866,9 +868,10 @@ String backlightStatus() {
            " network_suspended=" + String(networkSuspended() ? 1 : 0) +
            " " + offSleepStatus() +
            " " + deepSleepStatus() +
-           " off_sleep_mode=" + String((g_resumeDeepSleep ||
-                                        (g_scheduleNight ? g_config.nightSleepMode : g_config.daySleepMode)
-                                         == SleepMode::Deep) ? "deep" : "light") +
+           " sleep_stage=" + String(g_backlightPhase != BacklightPhase::Off ? "awake" :
+                                    g_sleepSequence.lightStarted() ? "light" : "screen_off") +
+           " light_sleep_after_min=" + String(g_config.lightSleepMinutes) +
+           " deep_sleep_after_min=" + String(g_config.deepSleepMinutes) +
            " " + keypadStatus();
 }
 
@@ -2499,7 +2502,7 @@ void setup() {
 
     bool dockWake = deepSleepWakeCause() == DeepWake::DockChange;
     if (dockWake) g_scheduleNight = deepSleepWasNight();
-    uint8_t brightness = dockWake ? 0 : constrain(g_config.brightness, (uint8_t)1, (uint8_t)100);
+    uint8_t brightness = dockWake ? 0 : g_config.dayBrightness;
     M5.Display.setBrightness((uint8_t)((brightness * 255 + 50) / 100));
     g_commandLedBrightness.store((uint8_t)((brightness * 255 + 50) / 100));
 
@@ -2558,16 +2561,33 @@ void setup() {
 
 static void offSleepTick() {
     if (g_backlightPhase != BacklightPhase::Off ||
-        M5.getBoard() != m5::board_t::board_M5Stack || dockConnected()) return;
+        M5.getBoard() != m5::board_t::board_M5Stack || dockConnected()) {
+        g_sleepSequence.reset();
+        return;
+    }
+    auto onBattery = [](bool force) {
+        if (batterySleepAllowed(false, readPowerStatus(force))) return true;
+        g_sleepSequence.reset();
+        g_resumeDeepSleep = false;
+        if (networkSuspended()) networkSetSuspended(false);
+        return false;
+    };
+    if (!onBattery(false)) return;
+    g_sleepSequence.screenOff(g_offStartedAt);
+    if (!g_resumeDeepSleep && !g_sleepSequence.lightStarted() &&
+        !g_sleepSequence.lightDue(millis(), g_config.lightSleepMinutes)) return;
     // Let the Off response leave the socket and allow active work to drain.
     if (millis() - g_offStartedAt < 500 || haHttpBusy() || connectedPowerWorkActive() ||
         g_commandLedActive.load() || g_lowBatteryLedPending.load() || !g_audioQuiet || dockInputPending()) return;
+    // Recheck immediately before a new sleep stage; cached battery data must
+    // not miss USB connected during the screen-off or light-sleep interval.
+    if ((!g_sleepSequence.lightStarted() || g_resumeDeepSleep ||
+         g_sleepSequence.deepDue(millis(), g_config.deepSleepMinutes)) && !onBattery(true)) return;
     if (!networkSetSuspended(true)) return;
 
     bool keypadWake = g_keypadIrqAvailable && !g_keypadIrqFault;
     if (g_keypadIrqAvailable) detachInterrupt(digitalPinToInterrupt(KEYPAD_IRQ_PIN));
-    bool scheduledDeep = (g_scheduleNight ? g_config.nightSleepMode : g_config.daySleepMode) == SleepMode::Deep;
-    if ((g_resumeDeepSleep || scheduledDeep) && keypadWake) {
+    if ((g_resumeDeepSleep || g_sleepSequence.deepDue(millis(), g_config.deepSleepMinutes)) && keypadWake) {
         enterDeepSleep(dockInputLevel(), g_scheduleNight);
         // Successful deep sleep never returns. Restore the UI on a failed or
         // cancelled entry, including a key arriving just before sleep.
@@ -2579,10 +2599,16 @@ static void offSleepTick() {
         noteActivity();
         return;
     }
-    OffWake wake = sleepWhileOff(keypadWake, g_keypadIrqVerified ? 60000 : 1000, dockInputLevel());
+    bool firstLight = !g_sleepSequence.lightStarted();
+    g_sleepSequence.startLight(millis());
+    uint32_t sleepMs = g_keypadIrqVerified ? 60000 : 1000;
+    if (keypadWake) sleepMs = g_sleepSequence.pollInterval(millis(), sleepMs, g_config.deepSleepMinutes);
+    OffWake wake = sleepWhileOff(keypadWake, sleepMs, dockInputLevel());
+    if (firstLight && wake == OffWake::Error) g_sleepSequence.reset();
     if (g_keypadIrqAvailable)
         attachInterrupt(digitalPinToInterrupt(KEYPAD_IRQ_PIN), keypadInterrupt, FALLING);
     if (wake != OffWake::Input) return;  // Dock changes are debounced next loop; timers stay Off.
+    g_sleepSequence.reset();
 
     // Preserve wake-only handling even if M5's button debounce completes later.
     g_wakeOnlyButtons |= (digitalRead(39) == LOW ? 1 : 0) |

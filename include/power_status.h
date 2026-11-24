@@ -20,6 +20,10 @@ struct PowerStatus {
     uint32_t recoveryAttempts = 0;
 };
 
+inline bool batterySleepAllowed(bool docked, const PowerStatus& power) {
+    return !docked && power.coreInput == 0;
+}
+
 inline const char* chargeStateName(ChargeState state) {
     switch (state) {
         case ChargeState::Inactive: return "inactive";

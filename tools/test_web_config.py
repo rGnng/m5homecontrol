@@ -104,8 +104,8 @@ int main(int argc,char** argv){
     for(int pages: {1,3,MAX_PAGES}){
         testDock=pages==3;
         server=WebServer{};serviced=0;g_config.pageCount=pages;g_config.entityCount=pages*GRID_SLOTS;
-        g_config.daySleepMode=pages==3?SleepMode::Light:SleepMode::Deep;
-        g_config.nightSleepMode=pages==3?SleepMode::Deep:SleepMode::Light;
+        g_config.lightSleepMinutes=pages==3?0:1;
+        g_config.deepSleepMinutes=pages==3?0:30;
         g_config.lowBatteryWarning=pages!=3;
         handleRoot();
         if(optionsComplete){
@@ -131,12 +131,15 @@ int main(int argc,char** argv){
         auto lowbat=power.find("name=\"lowbat\">");assert(lowbat!=std::string::npos);
         auto options=power.substr(lowbat,power.find("</select>",lowbat)-lowbat);
         assert(options.find(g_config.lowBatteryWarning?"value=\"on\" selected":"value=\"off\" selected")!=std::string::npos);
-        for(const char* period:{"d","n"}){
-            const bool deep=String(period)=="d"?g_config.daySleepMode==SleepMode::Deep:g_config.nightSleepMode==SleepMode::Deep;
-            auto select=html.find(std::string("name=\"")+period+"sleep\">");
-            assert(select!=std::string::npos);
-            auto choices=html.substr(select,html.find("</select>",select)-select);
-            assert(choices.find(deep?"value=\"deep\" selected":"value=\"light\" selected")!=std::string::npos);
+        assert(html.find("Fallback brightness")==std::string::npos && html.find("name=\"bright\"")==std::string::npos);
+        assert(html.find("name=\"dsleep\"")==std::string::npos && html.find("name=\"nsleep\"")==std::string::npos);
+        auto sleep=html.find("<fieldset><legend>Sleep(On battery)</legend>");assert(sleep!=std::string::npos);
+        auto section=html.substr(sleep,html.find("</fieldset>",sleep)-sleep);
+        assert(section.find("Off &rarr; Light sleep (min)")!=std::string::npos);
+        assert(section.find("Light sleep &rarr; Deep sleep (min)")!=std::string::npos);
+        for(const char* field:{"lightsleep","deepsleep"}){
+            auto name=std::string("name=\"")+field+"\"";
+            auto pos=section.find(name);assert(pos!=std::string::npos && section.find(name,pos+1)==std::string::npos);
         }
         assert(html.find("</body></html>")!=std::string::npos);
         assert(html.find("Room &amp; lights")!=std::string::npos && html.find("AC &lt;room&gt;")!=std::string::npos);

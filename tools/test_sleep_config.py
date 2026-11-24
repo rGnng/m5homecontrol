@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise actual web save and NVS load/save for independent day/night sleep modes."""
+"""Exercise actual web/NVS settings, shared sleep timers and old-config migration."""
 import ast
 from pathlib import Path
 import subprocess
@@ -69,35 +69,41 @@ struct{template<class... T>void printf(const char*,T...){}void println(const cha
 struct{int reboots=0;void restart(){++reboots;}}ESP;
 '''
 tests = r'''
-static void form(const char* day="deep",const char* night="light"){
+static void form(const char* light="1",const char* deep="30"){
     server.args={{"ssid","test"},{"host","ha-remote"},{"url","http://ha"},{"bright","30"},
                  {"dstart","07:00"},{"dend","21:00"},{"dbright","5"},{"ddimbright","1"},
                  {"ddim","300"},{"doff","0"},{"nstart","21:00"},{"nend","07:00"},
                  {"nbright","5"},{"ndimbright","1"},{"ndim","60"},{"noff","3600"},
-                 {"pagecount","1"},{"e0","switch.test"},{"ajax","1"},{"dsleep",day},{"nsleep",night}};
+                 {"pagecount","1"},{"e0","switch.test"},{"ajax","1"},{"lightsleep",light},{"deepsleep",deep}};
 }
 static void reload(){g_config=AppConfig{};configLoad();}
 static void timers(){assert(g_config.dayDimSeconds==300 && g_config.dayOffSeconds==0 && g_config.nightDimSeconds==60 && g_config.nightOffSeconds==3600);}
 int main(){
     ints={{"dd",300},{"do",0},{"nd",60},{"no",3600}};
     strings={{"ssid","test"},{"token","saved-secret"}};
-    reload();timers();assert(g_config.daySleepMode==SleepMode::Light && g_config.nightSleepMode==SleepMode::Light);
+    ints["bright"]=30;ints["dsm"]=1;ints["nsm"]=0;
+    reload();timers();assert(g_config.lightSleepMinutes==1 && g_config.deepSleepMinutes==30);
     assert(g_config.lowBatteryWarning); // Existing configurations enable the new warning by default.
     form();handleSave();assert(server.status==200 && ESP.reboots==1);
-    assert(ints["dsm"]==1 && ints["nsm"]==0);
-    reload();timers();assert(g_config.daySleepMode==SleepMode::Deep && g_config.nightSleepMode==SleepMode::Light);
+    assert(ints["lsm"]==1 && ints["dpm"]==30);
+    assert(!ints.count("bright") && !ints.count("dsm") && !ints.count("nsm"));
+    reload();timers();assert(g_config.lightSleepMinutes==1 && g_config.deepSleepMinutes==30);
     assert(g_config.haToken=="saved-secret"); // Blank password/token fields preserve credentials.
-    // Older forms and invalid mode values must preserve the existing selections.
-    form();server.args.erase("dsleep");server.args.erase("nsleep");handleSave();reload();timers();
-    assert(g_config.daySleepMode==SleepMode::Deep && g_config.nightSleepMode==SleepMode::Light);
-    form("invalid","2");handleSave();reload();
-    assert(g_config.daySleepMode==SleepMode::Deep && g_config.nightSleepMode==SleepMode::Light);
-    form("light","deep");handleSave();reload();timers();
-    assert(g_config.daySleepMode==SleepMode::Light && g_config.nightSleepMode==SleepMode::Deep);
-    assert(ints["dsm"]==0 && ints["nsm"]==1);
-    // Corrupt/unrecognized NVS values default to the established Light behavior.
-    ints["dsm"]=-1;ints["nsm"]=2;reload();timers();
-    assert(g_config.daySleepMode==SleepMode::Light && g_config.nightSleepMode==SleepMode::Light);
+    // Missing timer fields preserve the shared plan; each timer can be disabled.
+    form("2","90");handleSave();reload();timers();
+    assert(g_config.lightSleepMinutes==2 && g_config.deepSleepMinutes==90);
+    form();server.args.erase("lightsleep");server.args.erase("deepsleep");handleSave();reload();timers();
+    assert(g_config.lightSleepMinutes==2 && g_config.deepSleepMinutes==90);
+    form("0","0");handleSave();reload();
+    assert(g_config.lightSleepMinutes==0 && g_config.deepSleepMinutes==0);
+    for(const char* key:{"lightsleep","deepsleep"}) for(const char* bad:{"", "-1", "1.5", "1441", "oops", "999999"}){
+        form();server.args[key]=bad;server.args["ssid"]="must-not-apply";
+        int boots=ESP.reboots,errors=saveErrors;auto saved=ints;String ssid=g_config.ssid;
+        handleSave();assert(server.status==400 && ESP.reboots==boots && saveErrors==errors+1);
+        assert(ints==saved && g_config.ssid==ssid);
+    }
+    form("1440","1440");handleSave();reload();
+    assert(g_config.lightSleepMinutes==1440 && g_config.deepSleepMinutes==1440);
     form();server.args["lowbat"]="off";handleSave();reload();
     assert(!g_config.lowBatteryWarning && ints["lowbat"]==0);
     form();handleSave();reload();assert(!g_config.lowBatteryWarning); // Older forms preserve the choice.
@@ -126,7 +132,7 @@ int main(){
     g_config.nightStart=g_config.dayStart;assert(!configSave());reload();
     assert(g_config.dayStart!=g_config.nightStart);
     std::puts("PASS: linked start times, legacy gap/equal-time migration, validation before mutation, overnight schedules and missing-field preservation");
-    std::puts("PASS: actual web save/NVS roundtrip, independent sleep modes, old forms, invalid values, preserved timers and credentials");
+    std::puts("PASS: shared minute timers, disabled stages, old-config cleanup, malformed input, NVS roundtrip and preserved display settings/credentials");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='m5-sleep-config-') as directory:
@@ -134,8 +140,8 @@ with tempfile.TemporaryDirectory(prefix='m5-sleep-config-') as directory:
     (tmp/'Arduino.h').write_text(arduino)
     constants = source[source.index('static const char* NVS_NAMESPACE'):source.index('\n\nAppConfig g_config;')]
     code = prefix+constants+'\n'+''.join(function(s) for s in (
-        'static String sanitizeHostname(', 'static void normalizeAuxEntities(', 'static SleepMode parseSleepMode(',
-        'void configLoad(', 'bool configSave(', 'static int parseTime(', 'static void handleSave('))
+        'static String sanitizeHostname(', 'static void normalizeAuxEntities(',
+        'void configLoad(', 'bool configSave(', 'static int parseTime(', 'static int parseSleepMinutes(', 'static void handleSave('))
     (tmp/'test.cpp').write_text(code+tests)
     subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror',f'-I{tmp}',f'-I{ROOT/"include"}',
                     str(tmp/'test.cpp'),'-o',str(tmp/'test')],check=True)

@@ -199,9 +199,10 @@ GPIO26 input determines docking; PMIC inference does not change this policy.
 In normal display mode, the remote accepts live HA updates. Dim and off suspend
 HA data, show `--` for entity values, and freeze the status bar. Dim keeps Wi-Fi
 associated so web configuration, screenshots and OTA remain reachable. On Core
-Basic, Off stops Wi-Fi and uses the active day/night sleep-mode setting. Light
-sleep resumes on a keypad or Core A/B/C key; deep sleep boots the remote on a
-keypad key release. Web and OTA are unavailable while asleep.
+Basic, Off initially leaves Wi-Fi available, then follows the shared battery
+sleep timers. Light sleep resumes on a keypad or Core A/B/C key; deep sleep
+boots the remote on a keypad key release. Web and OTA are unavailable while asleep.
+Dock power, detected USB power, or an unknown input reading prevents device sleep.
 
 - Normal display mode disables Wi-Fi modem sleep, keeping the receiver awake
   even when the CPU is idle. Wi-Fi requests the SDK's maximum TX cap (20 dBm),
@@ -229,8 +230,9 @@ keypad key release. Web and OTA are unavailable while asleep.
 - Display off sends the LCD controller to sleep as well as setting backlight
   brightness to zero. Wake paints `--` before lighting the screen; asynchronous
   HA results then fill in the values.
-  Off waits for HTTP work, firmware uploads, sounds and LED animations to finish
-  before stopping the network and sleeping. GPIO35 (keypad) and GPIO39/38/37
+  After the screen-off delay, Off waits for HTTP work, firmware uploads, sounds
+  and LED animations to finish before stopping the network and sleeping.
+  GPIO35 (keypad) and GPIO39/38/37
   (Core A/B/C) wake the CPU in light sleep. With an unverified/faulty keypad IRQ, one-second
   timer wakes poll for keys; with a verified IRQ, health wakes run every minute.
   Timer wakes leave the screen and Wi-Fi off. A keypad wake can take up to one
@@ -408,13 +410,24 @@ is disabled (`0`): to Dim if **Dim after** is enabled, otherwise Normal.
 A Normal display stays Normal; 0% Day brightness keeps the screen dark.
 Initial clock sync does not trigger this wake.
 
-Each day/night period has an **Off sleep mode** selection in web configuration:
-**Light sleep** resumes the current view; **Deep sleep** stays asleep until a
-keypad key is released, then boots into the main menu and reconnects Wi-Fi/HA.
-Core A/B/C wake light sleep only. The wake press performs no entity action.
-The active period's selection applies to scheduled Off, R5C1 Off and web Off.
-Existing configurations default to Light sleep; saved timeouts are preserved.
-Select Deep sleep for the desired period and use **Save and reboot** to apply it.
+**Sleep(On battery)** has one shared plan, independent of Day/Night:
+
+| Setting | Default | Starts counting from |
+| --- | --- | --- |
+| Off → Light sleep (min) | 1 | Screen turning off |
+| Light sleep → Deep sleep (min) | 30 | Actual light-sleep entry |
+
+Both timers use whole minutes, up to 1440. `0` disables that stage; disabling
+Light sleep also blocks Deep sleep. The web page disables the Deep timer while
+Light is disabled, retaining its saved value. Screen Off keeps Wi-Fi/web access
+until Light sleep starts. Deep sleep boots into the main menu on a keypad key;
+Core A/B/C wake Light sleep only. The wake press performs no entity action.
+The same plan applies to scheduled Off, R5C1 Off and web Off. Docking and waking
+reset the sequence. No periodic wakes are added to Deep sleep.
+
+Existing configurations adopt the shared 1/30-minute defaults. Day/Night display
+settings are preserved. Saving removes the former per-period sleep modes and
+fallback brightness setting.
 
 | Display state | Appearance | First device key press |
 | --- | --- | --- |
@@ -460,7 +473,7 @@ Time updates are pushed by HA; there is no periodic REST time poll or NTP server
   subscription is created
 - Failed or invalid clock updates trigger a subscription retry after 30 seconds;
   a subscription with no valid update for three minutes is recreated
-- Until the first valid time sample, the configured fallback brightness is used
+- Until the first valid time sample, Day brightness is used
   and automatic dim/off timers wait for the clock
 
 The web **Display** section shows HA local time and timezone as a snapshot when
@@ -504,8 +517,8 @@ Fields:
 
 - Theme: `Flipper` (default) or `Classic`
 - Power: Low battery warning, on by default; double red flashes below 25% while undocked
-- Fallback brightness, 1-100%, default 30%
 - Day/night normal/dim brightness, dim/off timeouts, and live Wake/Dim/Off previews
+- One battery sleep plan: screen Off → Light sleep → Deep sleep, with minute timers
 - Dynamic page blocks: title + eight slots
 - Each slot: entity ID and display name
 - Climate slots only: optional AUX entity/name and allowed MODE values (COOL/HEAT/DRY/FAN/AUTO)
@@ -589,7 +602,6 @@ or zero when no request ran. Counters reset on reboot.
 :entity <1-96> <entity_id>
 :name <1-96> <display name>
 :title <1-12> <name>
-:bright <1-100>
 :show
 :clear
 :reboot
@@ -622,7 +634,7 @@ Cursor movement wraps within the current page and skips empty menu slots.
 | r1c2 (M) / r1c3 (%) | Previous / next page, wrapping at either end; main menu only |
 | 1–8 | Select and run that main-menu slot; in AC detail, 1–7 only focus a control |
 | r3c4 (+) / r4c4 (−) | Increase / decrease the selected adjustable value |
-| r5c1 (.) | Normal → Dim → Off (sleep) → wake only |
+| r5c1 (.) | Normal → Dim → Off → wake only |
 | 0 | Cancel a temperature edit; otherwise return to the main menu |
 | r5c4 (=), short or long press | Open AC detail if available; otherwise toggle/run the selected entity. In AC detail, activate the control or confirm an edit |
 
@@ -637,7 +649,7 @@ r4      7    8    9    -
 
 There are eight menu slots, so 9 has no assigned slot. The physical bottom-left
 `.` key (r5c1) dims from either the menu or AC detail. Pressing it in Dim puts
-the device to sleep immediately; pressing it in Off only wakes the device.
+the screen Off and starts the sleep sequence; pressing it in Off only wakes the device.
 Serial `.` still opens AC detail when awake.
 R5C3 has no assigned action.
 
@@ -647,8 +659,9 @@ After waking, `/diag` reports `deep_sleep_entries`, `deep_sleep_keypad_wakes`,
 `deep_sleep_timer_wakes`, `deep_sleep_dock_wakes`, `deep_sleep_undock_wakes`,
 `deep_sleep_errors`, and `deep_sleep_last_wake` (`none`, `keypad`, `dock`,
 `undock`, `timer`, or `other`). Counters survive deep sleep in RTC memory and
-reset on other kinds of boot. `off_sleep_mode` shows the active period's saved
-selection. Deep sleep has no periodic timer. The keypad wakes the
+reset on other kinds of boot. `sleep_stage` shows `awake`, `screen_off`, or `light`;
+`light_sleep_after_min` and `deep_sleep_after_min` show the shared timers.
+Deep sleep has no periodic timer. The keypad wakes the
 normal view; docking wakes Dim silently with LED feedback. Boot consumes the keypad wake
 byte before normal input, including retries after a failed I2C read.
 
@@ -799,6 +812,7 @@ src/main.cpp          menu UI, partial refresh, input
 src/app_config.cpp    NVS, network, web server, serial console
 src/ha_client.cpp     REST + WebSocket client
 src/power_status.cpp  shared power sampling, PMIC recovery, battery handoff
+include/sleep_sequence.h  shared battery sleep deadlines
 include/async_websocket.h  background TCP/TLS connection setup
 include/transfer_budget.h  cancellable transport time/byte limits
 include/network_io.h  bounded socket writes
