@@ -6,6 +6,11 @@
 class GuardedWebServer : public WebServer {
 public:
     using WebServer::WebServer;
+    bool listening() { return static_cast<bool>(_server); }
+    void stopServing() {
+        _currentClient.stop();
+        stop();
+    }
 protected:
     size_t _currentClientWrite(const char* bytes, size_t length) override {
         return writeClientWithin(_currentClient, reinterpret_cast<const uint8_t*>(bytes), length);

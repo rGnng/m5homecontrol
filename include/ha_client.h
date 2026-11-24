@@ -73,6 +73,7 @@ String displayText(const String& text);
 
 void haBegin();
 void haLoop();
+void haNetworkDown();
 void haSetDataSuspended(bool suspended);
 bool haDataSuspended();
 uint32_t haDataGeneration();

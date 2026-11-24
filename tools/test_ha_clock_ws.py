@@ -31,10 +31,19 @@ static std::vector<std::string> sent;
 static void pollHttpWork(){}
 static bool g_dataSuspended=false,g_wsResumePending=false;
 static uint32_t g_dataGeneration=0,g_discardedHttp=0;
-struct {int loops=0;void loop(){++loops;} void disconnect(){} void setReconnectInterval(int){} void pollConnect(){} } ws;
+struct {
+    int loops=0, disconnects=0, reconnectInterval=5000;
+    bool suspended=false;
+    void loop(){assert(!suspended);++loops;}
+    void disconnect(){++disconnects;}
+    void setReconnectInterval(int interval){reconnectInterval=interval;}
+    void pollConnect(){}
+    void setSuspended(bool value){suspended=value;}
+} ws;
 enum WStype_t {WStype_CONNECTED,WStype_DISCONNECTED,WStype_TEXT,WStype_ERROR};
 static constexpr int WL_CONNECTED=3;
-bool networkConnected(){return true;}
+static bool testNetworkUp=true;
+bool networkConnected(){return testNetworkUp;}
 static bool g_wsStarted=true,g_wsAuthed=false;
 static uint32_t g_wsMessageId=1,g_wsClockId=0,g_clockRetryAt=0;
 static uint32_t g_wsStateId=0,g_stateRetryAt=0;
@@ -57,7 +66,7 @@ static void wsSendJson(JsonDocument& doc){std::string out;serializeJson(doc,out)
 signatures=['static uint64_t clockMillis(', 'bool haClockReady(', 'bool haGetLocalTime(', 'String haTimeZone(',
             'String haLocalTimeText(', 'String haClockStatus(', 'String haConnectionStatus(', 'static void wsSubscribeClock(',
             'static bool syncClock(', 'static bool stateEntityConfigured(', 'static void wsSubscribe(', 'static void wsHandleText(', 'static void wsEvent(',
-            'void haLoop(', 'bool haWsConnected(', 'bool haStateUpdatesReady(']
+            'void haNetworkDown(', 'void haLoop(', 'bool haWsConnected(', 'bool haStateUpdatesReady(']
 stats=source[source.index('struct HaLinkStats {'):source.index('static uint64_t clockMillis(')]
 tests=r'''
 static void message(const std::string& json){wsHandleText(reinterpret_cast<const uint8_t*>(json.data()),json.size());}
@@ -160,6 +169,12 @@ int main(){
     assert(stateEvents==3 && g_linkStats.stateEvents==3);
     g_config.entityCount=0;wsSubscribe();
     assert(g_wsStateId==0 && g_watchedEntities==0 && haStateUpdatesReady());
+    int loopsBeforeDrop=ws.loops, socketsBeforeDrop=ws.disconnects;
+    testNetworkUp=false;
+    haNetworkDown();haLoop();
+    assert(ws.suspended && ws.disconnects==socketsBeforeDrop+1 && ws.loops==loopsBeforeDrop);
+    testNetworkUp=true;haLoop();
+    assert(!ws.suspended && ws.loops==loopsBeforeDrop+1 && ws.reconnectInterval==5000);
     std::puts("PASS: actual HA clock subscription, object/text updates, local time/zone diagnostics, invalid/stale IDs, state events, retries and reconnects");
 }
 '''

@@ -11,6 +11,8 @@
 #include <esp_netif.h>
 #include <esp_core_dump.h>
 #include <atomic>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 
 #include "ha_client.h"
 #include "connected_power.h"
@@ -31,16 +33,30 @@ static GuardedWebServer server(80);
 static bool g_apMode = false;
 static bool g_routesReady = false;
 static bool g_serverStarted = false;
-static bool g_wifiWasConnected = false;
 static bool g_mdnsStarted = false;
 static bool g_networkSuspended = false;
-static uint32_t g_wifiCheckedAt = 0, g_lastReconnect = 0;
-static unsigned g_wifiRetryCount = 0;
-static uint32_t g_wifiRadioRestarts = 0;
+
+enum class WifiPhase { Stopped, Starting, JoinDelay, Joining, Online, Disconnecting, Stopping };
+struct WifiEvent { arduino_event_id_t id; uint32_t detail; };
+static WifiPhase g_wifiPhase = WifiPhase::Stopped;
+static bool g_wifiInitialized = false, g_stationConfigured = false;
+static bool g_wifiAssociated = false, g_wifiStopAccepted = false;
+static bool g_wifiRestartPending = false;
+static uint32_t g_wifiDeadline = 0, g_wifiAddress = 0;
+static uint32_t g_wifiIpEvents = 0, g_wifiStopEvents = 0, g_wifiRadioRestarts = 0;
+static unsigned g_wifiRetryCount = 0, g_wifiDisconnectReason = 0;
 static int g_wifiConnectError = ESP_OK;
-static std::atomic<unsigned> g_wifiDisconnectReason{0};
-static constexpr uint32_t WIFI_CHECK_INTERVAL_MS = 500;
-static constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 15000;
+static constexpr uint32_t WIFI_EVENT_TIMEOUT_MS = 2000;
+static constexpr uint32_t WIFI_DISCONNECT_TIMEOUT_MS = 750;
+static constexpr uint32_t WIFI_IP_TIMEOUT_MS = 12000;
+static constexpr uint32_t WIFI_RETRY_MS = 2000;
+static constexpr uint32_t WIFI_LINK_CHECK_MS = 1000;
+static constexpr unsigned WIFI_MAX_JOIN_ATTEMPTS = 3;
+static constexpr unsigned WIFI_EVENT_QUEUE_SIZE = 16;
+static StaticQueue_t g_wifiEventQueue;
+static uint8_t g_wifiEventStorage[WIFI_EVENT_QUEUE_SIZE * sizeof(WifiEvent)];
+static QueueHandle_t g_wifiEvents = nullptr;
+static std::atomic<bool> g_wifiEventOverflow{false};
 
 static String sanitizeHostname(const String& value) {
     String in = value;
@@ -1330,6 +1346,7 @@ static void handleScreenshot() {
 }
 
 static String stationHostname();
+static const char* wifiPhaseName();
 
 static void startWebServer() {
     if (!g_routesReady) {
@@ -1373,7 +1390,10 @@ static void startWebServer() {
             wifi_config_t station = {};
             text += " wifi_rssi_dbm=" + String(networkConnected() ? WiFi.RSSI() : -127);
             text += " wifi_driver_status=" + String(int(WiFi.status()));
-            text += " wifi_last_disconnect_reason=" + String(g_wifiDisconnectReason.load());
+            text += " wifi_last_disconnect_reason=" + String(g_wifiDisconnectReason);
+            text += " wifi_phase=" + String(wifiPhaseName());
+            text += " wifi_ip_events=" + String(g_wifiIpEvents);
+            text += " wifi_stop_events=" + String(g_wifiStopEvents);
             text += " wifi_connect_error=" + String(g_wifiConnectError);
             text += " wifi_retry_count=" + String(g_wifiRetryCount);
             text += " wifi_radio_restarts=" + String(g_wifiRadioRestarts);
@@ -1428,7 +1448,11 @@ static void startWebServer() {
     }
     if (!g_serverStarted) {
         server.begin();
-        g_serverStarted = true;
+        g_serverStarted = server.listening();
+        if (!g_serverStarted) {
+            server.stopServing();
+            Serial.println("[net] web listener failed; will retry");
+        }
     }
 }
 
@@ -1436,23 +1460,42 @@ static void startWebServer() {
 //  Network
 // ---------------------------------------------------------------------
 static String stationHostname() {
-    // WiFi.getHostname() returns Arduino's cache, which can differ from DHCP.
+    // Arduino's cached hostname can differ from what the DHCP client uses.
     esp_netif_t* station = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     const char* name = nullptr;
     if (station && esp_netif_get_hostname(station, &name) == ESP_OK && name) return String(name);
     return String("unavailable");
 }
 
-static void startAccessPoint() {
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP("HA-Remote");
-    g_apMode = true;
-    startWebServer();
-    Serial.printf("[net] AP mode ssid=HA-Remote ip=%s\n", WiFi.softAPIP().toString().c_str());
+static const char* wifiPhaseName() {
+    switch (g_wifiPhase) {
+        case WifiPhase::Stopped: return "stopped";
+        case WifiPhase::Starting: return "starting";
+        case WifiPhase::JoinDelay: return "retry_wait";
+        case WifiPhase::Joining: return "joining";
+        case WifiPhase::Online: return "online";
+        case WifiPhase::Disconnecting: return "disconnecting";
+        case WifiPhase::Stopping: return "stopping";
+    }
+    return "unknown";
+}
+
+static void setWifiPhase(WifiPhase phase, uint32_t now, uint32_t delayMs = 0) {
+    g_wifiPhase = phase;
+    g_wifiDeadline = now + delayMs;
+}
+
+static esp_netif_t* wifiNetif() {
+    return esp_netif_get_handle_from_ifkey(g_apMode ? "WIFI_AP_DEF" : "WIFI_STA_DEF");
+}
+
+static bool stationHasAddress(uint32_t address) {
+    auto* netif = wifiNetif();
+    return address && netif && esp_netif_is_netif_up(netif) && uint32_t(WiFi.localIP()) == address;
 }
 
 static void setMaximumWifiTxPower() {
-    // SDK power units are quarter-dBm; PHY/country limits still apply.
+    // SDK units are quarter-dBm. The driver applies country and PHY limits.
     if (esp_wifi_set_max_tx_power(80) != ESP_OK) {
         Serial.println("[net] could not set maximum Wi-Fi transmit power");
     }
@@ -1460,129 +1503,277 @@ static void setMaximumWifiTxPower() {
 
 static void stopNetworkServices() {
     if (g_serverStarted) {
-        server.client().stop();
-        server.stop();
+        server.stopServing();
         g_serverStarted = false;
     }
     if (g_mdnsStarted) MDNS.end();
-    g_mdnsStarted = g_wifiWasConnected = false;
+    g_mdnsStarted = false;
+    if (g_wifiAddress) haNetworkDown();
+    g_wifiAddress = 0;
+}
+
+// The Arduino event task only records events. The main loop owns transitions,
+// driver calls and application sockets, including recovery after queue overflow.
+static void captureWifiEvent(arduino_event_id_t id, arduino_event_info_t info) {
+    WifiEvent event{id, 0};
+    switch (id) {
+        case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+            event.detail = info.wifi_sta_disconnected.reason;
+            break;
+        case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+            event.detail = info.got_ip.ip_info.ip.addr;
+            break;
+        case ARDUINO_EVENT_WIFI_STA_START:
+        case ARDUINO_EVENT_WIFI_STA_STOP:
+        case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+        case ARDUINO_EVENT_WIFI_STA_LOST_IP:
+        case ARDUINO_EVENT_WIFI_AP_START:
+        case ARDUINO_EVENT_WIFI_AP_STOP:
+            break;
+        default:
+            return;
+    }
+    if (xQueueSend(g_wifiEvents, &event, 0) != pdTRUE) g_wifiEventOverflow.store(true);
+}
+
+static bool configureStation() {
+    wifi_config_t station = {};
+    auto& config = station.sta;
+    if (g_config.ssid.length() > sizeof(config.ssid) || g_config.pass.length() > sizeof(config.password)) {
+        g_wifiConnectError = ESP_ERR_INVALID_ARG;
+        return false;
+    }
+    memcpy(config.ssid, g_config.ssid.c_str(), g_config.ssid.length());
+    memcpy(config.password, g_config.pass.c_str(), g_config.pass.length());
+    config.listen_interval = 10;
+    config.scan_method = WIFI_FAST_SCAN;
+    config.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+    config.threshold.rssi = -127;
+    config.threshold.authmode = g_config.pass.isEmpty() ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
+    config.pmf_cfg.capable = true;
+    g_wifiConnectError = esp_wifi_set_config(WIFI_IF_STA, &station);
+    return g_wifiConnectError == ESP_OK;
+}
+
+static void startWifi(uint32_t now) {
+    if (!g_wifiEvents) {
+        g_wifiEvents = xQueueCreateStatic(WIFI_EVENT_QUEUE_SIZE, sizeof(WifiEvent), g_wifiEventStorage, &g_wifiEventQueue);
+        WiFi.onEvent(captureWifiEvent);
+        WiFi.setAutoReconnect(false);
+        WiFi.setSleep(false);
+    }
+    g_wifiAssociated = false;
+    g_wifiRetryCount = 0;
+    setWifiPhase(WifiPhase::Starting, now, WIFI_EVENT_TIMEOUT_MS);
+    if (g_wifiInitialized) {
+        // Keep the Arduino driver and netif initialized across light sleep.
+        // Pair this start with esp_wifi_stop(), not with Arduino mode changes.
+        g_wifiConnectError = esp_wifi_start();
+    } else {
+        g_apMode = g_config.ssid.isEmpty();
+        // Set the hostname before Arduino creates the DHCP interface.
+        WiFi.setHostname(g_config.hostname.c_str());
+        g_wifiInitialized = WiFi.mode(g_apMode ? WIFI_AP : WIFI_STA);
+        g_wifiConnectError = g_wifiInitialized ? ESP_OK : ESP_FAIL;
+    }
+    Serial.printf("[net] start result=%d\n", g_wifiConnectError);
+    if (g_wifiConnectError != ESP_OK) setWifiPhase(WifiPhase::Stopped, now, WIFI_RETRY_MS);
+}
+
+static void stopWifi(uint32_t now) {
+    g_wifiAssociated = false;
+    int result = esp_wifi_stop();
+    g_wifiStopAccepted = result == ESP_OK;
+    g_wifiConnectError = result;
+    setWifiPhase(WifiPhase::Stopping, now, WIFI_EVENT_TIMEOUT_MS);
+    Serial.printf("[net] stop result=%d\n", result);
+}
+
+static void beginWifiStop(uint32_t now) {
+    stopNetworkServices();
+    if (!g_apMode) {
+        wifi_ap_record_t ap = {};
+        bool associated = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+        int result = esp_wifi_disconnect();  // Also cancels an in-progress join.
+        Serial.printf("[net] disconnect requested result=%d\n", result);
+        if (associated && result == ESP_OK) {
+            setWifiPhase(WifiPhase::Disconnecting, now, WIFI_DISCONNECT_TIMEOUT_MS);
+            return;
+        }
+    }
+    stopWifi(now);
+}
+
+static void restartWifi(uint32_t now) {
+    ++g_wifiRadioRestarts;
+    g_wifiRestartPending = true;
+    beginWifiStop(now);
+}
+
+static void wifiStopped(uint32_t now) {
+    g_wifiAssociated = false;
+    setWifiPhase(WifiPhase::Stopped, now, g_wifiRestartPending ? WIFI_RETRY_MS : 0);
+    g_wifiRestartPending = false;
+}
+
+static void joinWifi(uint32_t now) {
+    ++g_wifiRetryCount;
+    setWifiPhase(WifiPhase::Joining, now, WIFI_IP_TIMEOUT_MS);
+    g_wifiConnectError = esp_wifi_connect();
+    Serial.printf("[net] join attempt=%u result=%d\n", g_wifiRetryCount, g_wifiConnectError);
+    if (g_wifiConnectError != ESP_OK) setWifiPhase(WifiPhase::JoinDelay, now, WIFI_RETRY_MS);
+}
+
+static void handleWifiEvent(const WifiEvent& event, uint32_t now) {
+    switch (event.id) {
+        case ARDUINO_EVENT_WIFI_STA_START:
+            if (g_wifiPhase != WifiPhase::Starting || g_apMode || g_networkSuspended) return;
+            if (!g_stationConfigured) g_stationConfigured = configureStation();
+            if (!g_stationConfigured) {
+                Serial.printf("[net] station config failed result=%d\n", g_wifiConnectError);
+                restartWifi(now);
+                return;
+            }
+            esp_wifi_set_ps(WIFI_PS_NONE);
+            joinWifi(now);
+            break;
+        case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+            if (g_wifiPhase != WifiPhase::Joining && g_wifiPhase != WifiPhase::JoinDelay) return;
+            g_wifiAssociated = true;
+            setWifiPhase(WifiPhase::Joining, now, WIFI_IP_TIMEOUT_MS);
+            Serial.println("[net] associated; waiting for IP");
+            break;
+        case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+            if (g_networkSuspended || !g_wifiAssociated ||
+                (g_wifiPhase != WifiPhase::Joining && g_wifiPhase != WifiPhase::Online) ||
+                !stationHasAddress(event.detail)) return;
+            if (g_wifiPhase == WifiPhase::Online && g_wifiAddress == event.detail) return;
+            stopNetworkServices();
+            g_wifiAddress = event.detail;
+            ++g_wifiIpEvents;
+            g_wifiRetryCount = 0;
+            g_wifiConnectError = ESP_OK;
+            setWifiPhase(WifiPhase::Online, now);
+            setMaximumWifiTxPower();
+            Serial.printf("[net] got IP %s hostname=%s\n", WiFi.localIP().toString().c_str(), stationHostname().c_str());
+            break;
+        case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+            g_wifiDisconnectReason = event.detail;
+            g_wifiAssociated = false;
+            Serial.printf("[net] disconnected reason=%u\n", g_wifiDisconnectReason);
+            if (g_wifiPhase == WifiPhase::Disconnecting) {
+                stopWifi(now);
+            } else if (!g_networkSuspended && (g_wifiPhase == WifiPhase::Joining ||
+                       g_wifiPhase == WifiPhase::JoinDelay || g_wifiPhase == WifiPhase::Online)) {
+                stopNetworkServices();
+                setWifiPhase(WifiPhase::JoinDelay, now, WIFI_RETRY_MS);
+            }
+            break;
+        case ARDUINO_EVENT_WIFI_STA_LOST_IP:
+            // A delayed loss event from an older lease can arrive after a new IP.
+            if (g_wifiPhase == WifiPhase::Online && !stationHasAddress(g_wifiAddress)) restartWifi(now);
+            break;
+        case ARDUINO_EVENT_WIFI_AP_START:
+            if (g_wifiPhase == WifiPhase::Starting && g_apMode && !g_networkSuspended) {
+                if (WiFi.softAP("HA-Remote")) {
+                    setWifiPhase(WifiPhase::Online, now);
+                    Serial.println("[net] setup access point ready");
+                } else restartWifi(now);
+            }
+            break;
+        case ARDUINO_EVENT_WIFI_STA_STOP:
+        case ARDUINO_EVENT_WIFI_AP_STOP:
+            // Await the stop event before powering back up. Ignore an old event
+            // after the fallback path has already started the next session.
+            if (g_wifiPhase == WifiPhase::Starting) return;
+            stopNetworkServices();
+            ++g_wifiStopEvents;
+            wifiStopped(now);
+            Serial.println("[net] station stopped");
+            break;
+        default:
+            break;
+    }
 }
 
 void networkBegin() {
-    if (g_config.ssid.isEmpty()) {
-        startAccessPoint();
-        return;
-    }
-
-    static bool listening = false;
-    if (!listening) {
-        WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) {
-            g_wifiDisconnectReason.store(info.wifi_sta_disconnected.reason);
-        }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
-        listening = true;
-    }
-
-    g_apMode = false;
-    g_wifiRetryCount = 0;
-    g_lastReconnect = millis();
-    g_wifiCheckedAt = g_lastReconnect - WIFI_CHECK_INTERVAL_MS;
-
-    // The Arduino core applies its cached hostname when enabling STA mode.
-    // Setting it afterward leaves DHCP advertising the default esp32-XXXXXX.
-    WiFi.setHostname(g_config.hostname.c_str());
-    if (!WiFi.mode(WIFI_STA)) {
-        Serial.println("[net] could not start Wi-Fi station");
-        return;
-    }
-    WiFi.setSleep(false);  // Normal mode: keep the receiver awake.
-    setMaximumWifiTxPower();
-    // Configure credentials without associating, then set the listen interval
-    // before connection. Retry with the existing station configuration.
-    WiFi.begin(g_config.ssid.c_str(), g_config.pass.c_str(), 0, nullptr, false);
-    wifi_config_t station = {};
-    if (esp_wifi_get_config(WIFI_IF_STA, &station) == ESP_OK) {
-        station.sta.listen_interval = 10;
-        if (esp_wifi_set_config(WIFI_IF_STA, &station) != ESP_OK) {
-            Serial.println("[net] could not configure Wi-Fi listen interval");
-        }
-    }
-    g_wifiConnectError = esp_wifi_connect();
-    Serial.printf("[net] connecting ssid=%s\n", g_config.ssid.c_str());
+    g_networkSuspended = false;
+    if (g_wifiPhase == WifiPhase::Stopped) startWifi(millis());
 }
 
 void networkLoop() {
-    if (g_networkSuspended) return;
-    if (g_serverStarted) server.handleClient();
-
-    if (g_apMode) return;
-
-    uint32_t now = millis();
-    if (now - g_wifiCheckedAt < WIFI_CHECK_INTERVAL_MS) return;
-    g_wifiCheckedAt = now;
-    // Arduino's cached status can stay connected after an authentication
-    // timeout. Check association and the station's address as well.
-    wifi_ap_record_t ap = {};
-    bool associated = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
-    if (associated && WiFi.status() == WL_CONNECTED && uint32_t(WiFi.localIP()) != 0) {
-        g_wifiRetryCount = 0;
-        if (!g_wifiWasConnected) {
-            // Reapply after association/country information is available, also
-            // on reconnect, rather than relying only on the startup request.
-            setMaximumWifiTxPower();
-            g_wifiWasConnected = true;
-            Serial.printf("[net] station ssid=%s ip=%s rssi=%d hostname=%s\n",
-                          WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
-                          WiFi.RSSI(), stationHostname().c_str());
-            if (!g_mdnsStarted && MDNS.begin(g_config.hostname.c_str())) {
-                MDNS.addService("http", "tcp", 80);
-                g_mdnsStarted = true;
-            }
-            startWebServer();
+    const uint32_t now = millis();
+    WifiEvent event;
+    if (g_wifiEvents) {
+        if (g_wifiEventOverflow.exchange(false)) {
+            xQueueReset(g_wifiEvents);
+            Serial.println("[net] event queue overflow");
+            if (g_wifiPhase != WifiPhase::Stopped && g_wifiPhase != WifiPhase::Stopping) restartWifi(now);
         }
-        return;
+        while (xQueueReceive(g_wifiEvents, &event, 0) == pdTRUE) handleWifiEvent(event, now);
     }
 
-    if (g_wifiWasConnected) {
-        g_wifiWasConnected = false;
-        g_lastReconnect = now;  // Give the driver's automatic retry time to work.
+    if (g_networkSuspended && g_wifiPhase != WifiPhase::Stopped &&
+        g_wifiPhase != WifiPhase::Disconnecting && g_wifiPhase != WifiPhase::Stopping) {
+        beginWifiStop(now);
     }
-    if (now - g_lastReconnect < WIFI_RETRY_INTERVAL_MS) return;
-    g_lastReconnect = now;
-    if (g_wifiRetryCount == 2) {
-        Serial.println("[net] association or DHCP did not recover; restarting radio");
-        stopNetworkServices();
-        if (WiFi.mode(WIFI_OFF)) ++g_wifiRadioRestarts;
-        else Serial.println("[net] could not stop Wi-Fi radio");
-        networkBegin();
-        return;
+    if (int32_t(now - g_wifiDeadline) >= 0) {
+        switch (g_wifiPhase) {
+            case WifiPhase::Stopped:
+                if (!g_networkSuspended) startWifi(now);
+                break;
+            case WifiPhase::Starting:
+            case WifiPhase::Joining:
+                Serial.printf("[net] timeout phase=%s\n", wifiPhaseName());
+                restartWifi(now);
+                break;
+            case WifiPhase::JoinDelay:
+                if (g_wifiRetryCount >= WIFI_MAX_JOIN_ATTEMPTS) restartWifi(now);
+                else joinWifi(now);
+                break;
+            case WifiPhase::Disconnecting:
+                stopWifi(now);
+                break;
+            case WifiPhase::Stopping: {
+                auto* netif = wifiNetif();
+                if (g_wifiStopAccepted && (!netif || !esp_netif_is_netif_up(netif))) {
+                    // An event may be lost. The successful stop and closed
+                    // interface provide an independent completion check.
+                    Serial.println("[net] stop event missing; interface closed");
+                    wifiStopped(now);
+                } else {
+                    Serial.println("[net] stop incomplete; retrying");
+                    stopWifi(now);
+                }
+                break;
+            }
+            case WifiPhase::Online: {
+                g_wifiDeadline = now + WIFI_LINK_CHECK_MS;
+                wifi_ap_record_t ap = {};
+                if (!g_apMode && (!stationHasAddress(g_wifiAddress) || esp_wifi_sta_get_ap_info(&ap) != ESP_OK)) {
+                    restartWifi(now);
+                    break;
+                }
+                if (!g_apMode && !g_mdnsStarted && MDNS.begin(g_config.hostname.c_str())) {
+                    MDNS.addService("http", "tcp", 80);
+                    g_mdnsStarted = true;
+                }
+                startWebServer();
+                break;
+            }
+        }
     }
-
-    ++g_wifiRetryCount;
-    // Force a fresh association if DHCP stalled. Use the driver directly so
-    // the stale Arduino status cannot short-circuit the connect request.
-    if (associated) esp_wifi_disconnect();
-    g_wifiConnectError = esp_wifi_connect();
-    Serial.printf("[net] Wi-Fi retry %u status=%d associated=%d reason=%u result=%d\n",
-                  g_wifiRetryCount, int(WiFi.status()), int(associated),
-                  g_wifiDisconnectReason.load(), g_wifiConnectError);
+    if (g_serverStarted) server.handleClient();
 }
 
 bool networkSuspended() { return g_networkSuspended; }
-bool networkConnected() { return g_wifiWasConnected && !g_networkSuspended && !g_apMode; }
+bool networkConnected() { return g_wifiPhase == WifiPhase::Online && !g_networkSuspended && !g_apMode; }
 
 bool networkSetSuspended(bool suspended) {
-    if (g_networkSuspended == suspended) return true;
     g_networkSuspended = suspended;
-    if (suspended) {
-        stopNetworkServices();
-        if (WiFi.mode(WIFI_OFF)) return true;
-        // Keep the device recoverable if the driver could not stop the radio.
-        g_networkSuspended = false;
-        networkBegin();
-        return false;
-    }
-    networkBegin();  // Reapply hostname/listen interval and restart web/mDNS on association.
-    return true;
+    // Off sleep is called every loop until the stop is complete. An input
+    // during shutdown clears the request and joins after that same stop.
+    return !suspended || g_wifiPhase == WifiPhase::Stopped;
 }
 
 bool configModeActive() {

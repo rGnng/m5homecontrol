@@ -836,11 +836,20 @@ void haBegin() {
     Serial.printf("[ha] ws connecting to %s:%d\n", host.c_str(), port);
 }
 
+void haNetworkDown() {
+    ws.setSuspended(true);
+    if (g_wsStarted) ws.disconnect();
+    g_linkStats.lastLoopMs = 0;
+    g_wsResumePending = g_wsStarted;
+    if (g_wsResumePending) ws.setReconnectInterval(0);
+}
+
 void haLoop() {
     pollHttpWork();
     ws.pollConnect();
-    if (g_dataSuspended) return;
+    if (g_dataSuspended || !networkConnected()) return;
     if (g_wsStarted) {
+        ws.setSuspended(false);
         uint64_t now = clockMillis();
         if (g_linkStats.lastLoopMs) {
             uint32_t gap = static_cast<uint32_t>(now - g_linkStats.lastLoopMs);

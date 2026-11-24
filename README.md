@@ -575,10 +575,12 @@ event has been recorded. `ws_last_disconnect_time` also reports the disconnect
 in HA local time when available. `ws_loop_max_gap_ms` records the longest gap
 between WebSocket processing calls.
 
-Wi-Fi reconnects on wake and verifies both association and an IP address.
-If two retries fail, it restarts the Wi-Fi radio and reopens web access after
-rejoining. `/diag` includes `wifi_last_disconnect_reason`, `wifi_connect_error`,
-`wifi_retry_count`, and `wifi_radio_restarts`.
+Battery sleep waits for the Wi-Fi station to stop. On wake, the station starts,
+joins the access point, and waits for a fresh IP before reopening web and HA
+connections. The serial log records each transition and its driver result.
+`/diag` includes `wifi_phase`, `wifi_ip_events`, `wifi_stop_events`,
+`wifi_last_disconnect_reason`, `wifi_connect_error`, `wifi_retry_count`, and
+`wifi_radio_restarts`.
 
 HA HTTP requests run asynchronously. Navigation, display scheduling, web handling,
 and WebSocket updates continue while a command or state read is in progress.
