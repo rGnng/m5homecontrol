@@ -301,8 +301,8 @@ static String htmlHeader(const String& title) {
     h += ".connection-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0}";
     h += ".connection-row+.connection-row{border-top:1px solid #222}.connection-info{min-width:0}";
     h += ".connection-name{display:block;color:#ddd;font-size:14px}.connection-value{display:block;color:#888;font-size:12px;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}";
-    h += ".connection-state{display:flex;align-items:center;gap:5px;flex-shrink:0;font-size:12px;color:#999}";
-    h += ".connection-state.up{color:#92c5a4}.connection-state.down{color:#d99898}";
+    h += ".connection-state{display:flex;align-items:center;flex-shrink:0;color:#999}";
+    h += ".connection-state.up{color:#ddd}.connection-state.down{color:#d99898}";
     h += "#ha-status.up .bi-house-x,#ha-status:not(.up) .bi-house{display:none}";
     h += ".metadata{display:grid;grid-template-columns:auto minmax(0,1fr);gap:5px 12px;font-size:12px;color:#888}.metadata dd{margin:0;color:#bbb;overflow-wrap:anywhere}";
     h += ".connection-clock{margin:8px 0 0;padding-top:10px;border-top:1px solid #222}";
@@ -480,11 +480,11 @@ static void handleRoot() {
     page += "<span id=\"wifi-status\" class=\"connection-state " + String(wifiConnected ? "up" : (g_apMode ? "idle" : "down")) +
             "\" role=\"status\" aria-label=\"Wi-Fi: " + wifiStatus + "\" title=\"Wi-Fi: " + wifiStatus + "\">";
     page += wifiReceptionIcon(wifiLevel);
-    page += "Wi-Fi</span>";
+    page += "</span>";
     page += "<span id=\"ha-status\" class=\"connection-state " + haState +
-            "\" role=\"status\" aria-label=\"Home Assistant: " + haLabel + "\">";
+            "\" role=\"status\" aria-label=\"Home Assistant: " + haLabel + "\" title=\"Home Assistant: " + haLabel + "\">";
     page += haConnectionIcons();
-    page += "HA</span>";
+    page += "</span>";
     page += "<span id=\"power-status\" role=\"status\">" + powerIcon() + "</span>";
     page += "<span id=\"dock-status\" role=\"status\"" + String(dockConnected() ? "" : " hidden") + ">" + dockIcon() + "</span></div>";
     page += "<button type=\"submit\">Save and reboot</button></div>";
@@ -520,7 +520,7 @@ static void handleRoot() {
     page += "<span aria-hidden=\"true\">&rarr;</span><span>Light sleep</span><span aria-hidden=\"true\">&rarr;</span>";
     page += "<span class=\"sleep-delay\"><input id=\"deepsleep\" name=\"deepsleep\" aria-label=\"Light sleep to deep sleep, minutes\" type=\"number\" min=\"0\" max=\"1440\" step=\"1\" required value=\"" + String(g_config.deepSleepMinutes) + "\"><span>min</span></span>";
     page += "<span aria-hidden=\"true\">&rarr;</span><span>Deep sleep</span></div>";
-    page += "<p>0 = disabled</p></fieldset>";
+    page += "</fieldset>";
 
     page += "<fieldset><legend>Display</legend>";
     page += "<label>Theme</label><select name=\"theme\">";
@@ -547,7 +547,7 @@ static void handleRoot() {
     scheduleRow("Dim brightness %", "dimbright", g_config.dayDimBrightness, g_config.nightDimBrightness, 1, 100);
     scheduleRow("Dim after (s)", "dim", g_config.dayDimSeconds, g_config.nightDimSeconds, 0, 3600);
     scheduleRow("Screen off after dim (s)", "off", g_config.dayOffSeconds, g_config.nightOffSeconds, 0, 3600);
-    page += "</tbody></table><p>0 = disabled</p>";
+    page += "</tbody></table>";
     page += "<div class=\"pagehead\">Preview display</div>";
     page += "<div class=\"actions display-preview\" role=\"group\" aria-label=\"Display preview\">"
             "<button type=\"button\" data-display-mode=\"wake\" aria-pressed=\"false\" onclick=\"previewDisplay('wake')\">Wake</button>"
