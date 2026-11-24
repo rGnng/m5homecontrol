@@ -463,7 +463,11 @@ static void handleRoot() {
     page += "</div><label>Low battery warning</label><select name=\"lowbat\">";
     page += "<option value=\"on\"" + String(g_config.lowBatteryWarning ? " selected" : "") + ">On</option>";
     page += "<option value=\"off\"" + String(!g_config.lowBatteryWarning ? " selected" : "") + ">Off</option></select>";
-    page += "<p>Below 25% and undocked: two red flashes per minute.</p></fieldset>";
+    page += "<p>Below 25% and undocked: two red flashes per minute.</p>";
+    page += "<div class=\"pagehead\">Battery saving</div>";
+    page += "<label>Off &rarr; Light sleep (min)<input name=\"lightsleep\" type=\"number\" min=\"0\" max=\"1440\" step=\"1\" required value=\"" + String(g_config.lightSleepMinutes) + "\"></label>";
+    page += "<label>Light sleep &rarr; Deep sleep (min)<input name=\"deepsleep\" type=\"number\" min=\"0\" max=\"1440\" step=\"1\" required value=\"" + String(g_config.deepSleepMinutes) + "\"></label>";
+    page += "<p>0 = disabled</p></fieldset>";
 
     page += "<fieldset><legend>Display</legend>";
     page += "<label>Theme</label><select name=\"theme\">";
@@ -497,11 +501,6 @@ static void handleRoot() {
             "<button type=\"button\" data-display-mode=\"dim\" aria-pressed=\"false\" onclick=\"previewDisplay('dim')\">Dim</button>"
             "<button type=\"button\" data-display-mode=\"off\" aria-pressed=\"false\" onclick=\"previewDisplay('off')\">Off</button></div>";
     page += "</fieldset>";
-
-    page += "<fieldset><legend>Sleep(On battery)</legend>";
-    page += "<label>Off &rarr; Light sleep (min)<input name=\"lightsleep\" type=\"number\" min=\"0\" max=\"1440\" step=\"1\" required value=\"" + String(g_config.lightSleepMinutes) + "\"></label>";
-    page += "<label>Light sleep &rarr; Deep sleep (min)<input name=\"deepsleep\" type=\"number\" min=\"0\" max=\"1440\" step=\"1\" required value=\"" + String(g_config.deepSleepMinutes) + "\"></label>";
-    page += "<p>0 = disabled</p></fieldset>";
 
     page += "<fieldset><legend>Device</legend>";
     page += "<div class=\"actions device-actions\">"

@@ -410,7 +410,7 @@ is disabled (`0`): to Dim if **Dim after** is enabled, otherwise Normal.
 A Normal display stays Normal; 0% Day brightness keeps the screen dark.
 Initial clock sync does not trigger this wake.
 
-**Sleep(On battery)** has one shared plan, independent of Day/Night:
+**Power → Battery saving** has one shared battery-only plan, independent of Day/Night:
 
 | Setting | Default | Starts counting from |
 | --- | --- | --- |

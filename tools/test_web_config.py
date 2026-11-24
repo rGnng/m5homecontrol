@@ -133,8 +133,9 @@ int main(int argc,char** argv){
         assert(options.find(g_config.lowBatteryWarning?"value=\"on\" selected":"value=\"off\" selected")!=std::string::npos);
         assert(html.find("Fallback brightness")==std::string::npos && html.find("name=\"bright\"")==std::string::npos);
         assert(html.find("name=\"dsleep\"")==std::string::npos && html.find("name=\"nsleep\"")==std::string::npos);
-        auto sleep=html.find("<fieldset><legend>Sleep(On battery)</legend>");assert(sleep!=std::string::npos);
-        auto section=html.substr(sleep,html.find("</fieldset>",sleep)-sleep);
+        assert(html.find("Sleep(On battery)")==std::string::npos);
+        auto sleep=power.find("<div class=\"pagehead\">Battery saving</div>");assert(sleep!=std::string::npos);
+        auto section=power.substr(sleep);
         assert(section.find("Off &rarr; Light sleep (min)")!=std::string::npos);
         assert(section.find("Light sleep &rarr; Deep sleep (min)")!=std::string::npos);
         for(const char* field:{"lightsleep","deepsleep"}){
