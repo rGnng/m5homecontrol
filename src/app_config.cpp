@@ -10,12 +10,14 @@
 #include <esp_wifi.h>
 #include <esp_netif.h>
 #include <esp_core_dump.h>
+#include <atomic>
 
 #include "ha_client.h"
 #include "connected_power.h"
 #include "html_stream.h"
 #include "power_status.h"
 #include "guarded_web_server.h"
+#include "web_icon_licenses.h"
 
 static const char* NVS_NAMESPACE = "haremote";
 static const char* DEFAULT_HA_URL = "";
@@ -29,12 +31,16 @@ static GuardedWebServer server(80);
 static bool g_apMode = false;
 static bool g_routesReady = false;
 static bool g_serverStarted = false;
-static bool g_staEverConnected = false;
 static bool g_wifiWasConnected = false;
 static bool g_mdnsStarted = false;
 static bool g_networkSuspended = false;
-static uint32_t g_connectStart = 0;
-static uint32_t g_lastReconnect = 0;
+static uint32_t g_wifiCheckedAt = 0, g_lastReconnect = 0;
+static unsigned g_wifiRetryCount = 0;
+static uint32_t g_wifiRadioRestarts = 0;
+static int g_wifiConnectError = ESP_OK;
+static std::atomic<unsigned> g_wifiDisconnectReason{0};
+static constexpr uint32_t WIFI_CHECK_INTERVAL_MS = 500;
+static constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 15000;
 
 static String sanitizeHostname(const String& value) {
     String in = value;
@@ -290,8 +296,8 @@ static String htmlHeader(const String& title) {
     h += "button,.button-link{display:inline-flex;align-items:center;justify-content:center;margin:0;padding:7px 12px;border:1px solid #666;border-radius:0;background:#111;color:#eee;text-decoration:none;white-space:nowrap;cursor:pointer}";
     h += "button[type=submit]{background:#eee;color:#000;border-color:#eee}";
     h += ".power-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px}";
-    h += ".battery-icon{display:block;width:60px;height:auto;color:#ddd}";
-    h += ".power-icons{display:flex;align-items:center;gap:12px}.dock-icon{display:block;width:30px;height:30px;color:#ddd}";
+    h += ".battery-icon{display:block;width:32px;height:32px;color:#ddd}";
+    h += ".dock-icon{display:block;width:24px;height:24px;color:#ddd}";
     h += ".connection-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0}";
     h += ".connection-row+.connection-row{border-top:1px solid #222}.connection-info{min-width:0}";
     h += ".connection-name{display:block;color:#ddd;font-size:14px}.connection-value{display:block;color:#888;font-size:12px;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}";
@@ -330,13 +336,15 @@ static String htmlHeader(const String& title) {
     h += ".actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0 0}";
     h += ".display-preview button[aria-pressed=true]{background:#eee;color:#000;border-color:#eee}";
     h += ".display-preview button[data-error=true]{border-color:#d77}";
-    h += ".actions.top{flex-wrap:nowrap;justify-content:space-between;margin:0 0 16px}";
+    h += ".actions.top{display:grid;grid-template-columns:auto 1fr auto;gap:12px;margin:0 0 16px}";
     h += ".actions.top h1{margin:0;white-space:nowrap}.actions.top button{flex-shrink:0;white-space:nowrap}";
+    h += ".title-status{display:flex;align-items:center;justify-content:flex-end;gap:14px;min-width:0}.title-status [hidden]{display:none}";
     h += ".footer-actions{justify-content:flex-end;margin:16px 0 0}";
     h += ".device-info{margin:12px 0 0}";
     h += ".device-actions{margin:0}";
     h += ".save-status{color:#bbb;font-size:14px;margin:0 0 16px}.save-status:empty{display:none}";
     h += "@media(max-width:800px){.layout{grid-template-columns:1fr}}";
+    h += "@media(max-width:600px){.actions.top{grid-template-columns:1fr auto}.title-status{grid-row:2;grid-column:1/-1;justify-content:flex-start}.actions.top>button{grid-row:1;grid-column:2}}";
     h += "@media(max-width:400px){.actions.top h1{font-size:20px}.battery-saving{font-size:10.5px;gap:1px}.sleep-delay{gap:1px}}";
     h += "</style></head><body>";
     return h;
@@ -363,32 +371,39 @@ static String powerSummary() {
 }
 
 static String dockIcon() {
-    return "<svg class=\"dock-icon\" role=\"img\" aria-label=\"Base powered; charging available\" viewBox=\"0 0 24 24\" "
-           "xmlns=\"http://www.w3.org/2000/svg\"><title>PC817C: base powered; charging available</title>"
-           "<g fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\">"
-           "<rect x=\"6\" y=\"2\" width=\"12\" height=\"14\" rx=\"1\"/>"
-           "<path d=\"M3 13v8h18v-8M6 18h12M10 13h4\"/></g></svg>";
+    return String("<svg class=\"dock-icon\" role=\"img\" aria-label=\"Base powered; charging available\" viewBox=\"0 0 24 24\" "
+           "xmlns=\"http://www.w3.org/2000/svg\" data-icon=\"uix-sharp:charging-dock\"><title>Dock powered</title>"
+           "<g fill=\"none\" stroke=\"currentColor\" stroke-linecap=\"square\" stroke-miterlimit=\"3.5\" stroke-width=\"1.5\">"
+           "<path d=\"M2.5 15.5v4a2 2 0 0 0 2 2h15a2 2 0 0 0 2-2v-4\"/>"
+           "<path d=\"M7 2.5h10v16.25H7Z\"/><path d=\"m12.75 6.25l-3 4.5H12l-.75 4l3-4.75H12Z\"/></g>") + UIX_ICON_LICENSE + "</svg>";
 }
 
 static String powerIcon() {
     PowerStatus power = readPowerStatus(true);
     int percent = power.batteryPercent;
     bool known = percent >= 0 && percent <= 100;
-    String label = known ? "Battery: " + String(percent) + "% (approximate)"
-                         : String("Battery status unavailable");
-    String svg = "<svg class=\"battery-icon\" role=\"img\" aria-label=\"" + label +
-                 "\" viewBox=\"0 0 46 24\" xmlns=\"http://www.w3.org/2000/svg\"><title>" + label + "</title>";
-    svg += "<rect x=\"1\" y=\"2\" width=\"38\" height=\"20\" rx=\"1\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"/>"
-           "<rect x=\"38\" y=\"8\" width=\"6\" height=\"8\" fill=\"currentColor\"/>";
-    if (known) {
-        int width = (percent * 32 + 50) / 100;
-        if (percent > 0 && width == 0) width = 1;
-        svg += "<rect class=\"battery-level\" x=\"4\" y=\"5\" width=\"" + String(width) +
-               "\" height=\"14\" fill=\"currentColor\"/>";
-    } else {
-        svg += "<text x=\"20\" y=\"18\" text-anchor=\"middle\" font-size=\"18\" fill=\"currentColor\">?</text>";
-    }
-    return svg + "</svg>";
+    const char* variant = !known || percent == 0 ? "battery" : percent <= 25 ? "battery-low"
+                                                      : percent < 75 ? "battery-half" : "battery-full";
+    const char* label = !known ? "Battery status unavailable" : percent == 0 ? "Battery empty"
+                        : percent <= 25 ? "Battery low" : percent < 75 ? "Battery half full" : "Battery high";
+    String svg = "<svg class=\"battery-icon bi bi-" + String(variant) + "\" role=\"img\" aria-label=\"" + label +
+                 "\" viewBox=\"0 0 16 16\" fill=\"currentColor\" xmlns=\"http://www.w3.org/2000/svg\"><title>" + label + "</title>";
+    if (known && percent > 0)
+        svg += percent <= 25 ? "<path d=\"M2 6h2v4H2z\"/>"
+                            : percent < 75 ? "<path d=\"M2 6h5v4H2z\"/>" : "<path d=\"M2 6h10v4H2z\"/>";
+    svg += "<path d=\"M2 4a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zm10 1a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm4 3a1.5 1.5 0 0 1-1.5 1.5v-3A1.5 1.5 0 0 1 16 8\"/>";
+    if (!known)
+        svg += "<text x=\"7\" y=\"10.5\" text-anchor=\"middle\" font-size=\"7\">?</text>";
+    return svg + BOOTSTRAP_ICON_LICENSE + "</svg>";
+}
+
+static String dockWebStatus() {
+    bool wifi = networkConnected();
+    const char* ha = g_config.haToken.isEmpty() ? "unconfigured"
+                    : wifi && haWsConnected() ? "connected" : "disconnected";
+    return String("{\"docked\":") + (dockConnected() ? "true" : "false") +
+           ",\"wifi\":\"" + (g_apMode ? "ap" : wifi ? "connected" : "disconnected") +
+           "\",\"ha\":\"" + ha + "\"}";
 }
 
 static String g_cachedEntityOptions;
@@ -396,7 +411,7 @@ static uint32_t g_entityOptionsAt = 0;
 static bool g_entityOptionsLoading = false;
 
 static void refreshEntityOptions() {
-    if (haDataSuspended() || g_apMode || WiFi.status() != WL_CONNECTED || g_config.haToken.isEmpty() ||
+    if (haDataSuspended() || !networkConnected() || g_config.haToken.isEmpty() ||
         g_entityOptionsLoading || (!g_cachedEntityOptions.isEmpty() &&
         millis() - g_entityOptionsAt < 60000)) return;
     g_entityOptionsLoading = haFetchEntityOptions([](bool ok, const String& options) {
@@ -419,7 +434,7 @@ static void handleRoot() {
     HtmlStream<WebServer> page(server, haLoop);
     page += htmlHeader("HA Remote Setup");
 
-    bool wifiConnected = !g_apMode && WiFi.status() == WL_CONNECTED;
+    bool wifiConnected = networkConnected();
     String wifiLabel = g_apMode ? String("HA-Remote")
                                : htmlEscape(wifiConnected ? WiFi.SSID() : g_config.ssid);
     String haLabel;
@@ -436,23 +451,28 @@ static void handleRoot() {
     }
 
     page += "<form method=\"post\" action=\"/save\">";
-    page += "<div class=\"actions top\"><h1>HA Remote</h1>"
-            "<button type=\"submit\">Save and reboot</button></div>";
+    page += "<div class=\"actions top\"><h1>HA Remote</h1>";
+    page += "<div class=\"title-status\" role=\"group\" aria-label=\"Device status\">";
+    page += "<span id=\"wifi-status\" class=\"connection-state " + String(wifiConnected ? "up" : (g_apMode ? "idle" : "down")) +
+            "\" role=\"status\" aria-label=\"Wi-Fi: " + String(g_apMode ? "Access point" : (wifiConnected ? "Connected" : "Disconnected")) + "\">Wi-Fi</span>";
+    page += "<span id=\"ha-status\" class=\"connection-state " + haState +
+            "\" role=\"status\" aria-label=\"Home Assistant: " + haLabel + "\">HA</span>";
+    page += "<span id=\"power-status\" role=\"status\">" + powerIcon() + "</span>";
+    page += "<span id=\"dock-status\" role=\"status\"" + String(dockConnected() ? "" : " hidden") + ">" + dockIcon() + "</span></div>";
+    page += "<button type=\"submit\">Save and reboot</button></div>";
     page += "<div id=\"save-status\" class=\"save-status\" role=\"status\"></div>";
     page += "<div class=\"layout\">";
     page += "<div class=\"col left\">";
 
     page += "<fieldset><legend>Connection</legend>";
-    auto connectionRow = [&](const char* label, const String& value,
-                             const String& state, const String& stateClass) {
+    auto connectionRow = [&](const char* label, const String& value) {
         page += "<div class=\"connection-row\"><div class=\"connection-info\">";
         page += "<span class=\"connection-name\">" + String(label) + "</span>";
         page += "<span class=\"connection-value\" title=\"" + value + "\">" + value + "</span></div>";
-        page += "<span class=\"connection-state " + stateClass + "\">" + state + "</span></div>";
+        page += "</div>";
     };
-    connectionRow("Wi-Fi", wifiLabel, g_apMode ? "Access point" : (wifiConnected ? "Connected" : "Disconnected"),
-                  wifiConnected ? "up" : (g_apMode ? "idle" : "down"));
-    connectionRow("Home Assistant", htmlEscape(g_config.haUrl), haLabel, haState);
+    connectionRow("Wi-Fi", wifiLabel);
+    connectionRow("Home Assistant", htmlEscape(g_config.haUrl));
     page += "<dl class=\"metadata connection-clock\"><dt>Time zone</dt><dd>" + htmlEscape(haTimeZone()) +
             "</dd><dt>Time</dt><dd>" + htmlEscape(haLocalTimeText()) + "</dd></dl>";
     page += "<div style=\"margin-top:12px\">";
@@ -460,9 +480,6 @@ static void handleRoot() {
     page += "</div></fieldset>";
 
     page += "<fieldset><legend>Power</legend><div class=\"power-row\">";
-    page += "<div class=\"power-icons\"><span id=\"power-status\" role=\"status\">" + powerIcon() + "</span>";
-    page += "<span id=\"dock-status\" role=\"status\"" + String(dockConnected() ? "" : " hidden") + ">" +
-            dockIcon() + "</span></div>";
     page += "<button type=\"button\" class=\"secondary\" onclick=\"refreshPower()\">Refresh</button>";
     page += "</div><label>Low battery warning</label><select name=\"lowbat\">";
     page += "<option value=\"on\"" + String(g_config.lowBatteryWarning ? " selected" : "") + ">On</option>";
@@ -772,6 +789,18 @@ async function refreshDock() {
     const state = await response.json();
     status.hidden = !state.docked;
     status.removeAttribute('title');
+    for (const [name, label] of [['wifi', 'Wi-Fi'], ['ha', 'Home Assistant']]) {
+      const indicator = document.getElementById(name + '-status');
+      const value = state[name];
+      if (!value) continue;
+      const connected = value === 'connected';
+      indicator.className = 'connection-state ' + (connected ? 'up' :
+          value === 'ap' || value === 'unconfigured' ? 'idle' : 'down');
+      const detail = connected ? 'Connected' : value === 'ap' ? 'Access point' :
+          value === 'unconfigured' ? 'Not configured' : 'Disconnected';
+      indicator.setAttribute('aria-label', label + ': ' + detail);
+      indicator.title = label + ': ' + detail;
+    }
   } catch (error) {
     status.title = 'Dock status unavailable';
   }
@@ -1276,8 +1305,7 @@ static void startWebServer() {
         server.on("/screenshot.bmp", HTTP_GET, handleScreenshot);
         server.on("/dock", HTTP_GET, []() {
             server.sendHeader("Cache-Control", "no-store");
-            server.send(200, "application/json", String("{\"docked\":") +
-                        (dockConnected() ? "true}" : "false}"));
+            server.send(200, "application/json", dockWebStatus());
         });
         server.on("/power", HTTP_GET, []() {
             server.sendHeader("Cache-Control", "no-store");
@@ -1303,7 +1331,12 @@ static void startWebServer() {
             text += " uptime_ms=" + String(millis());
             text += " reset_reason=" + String(static_cast<int>(esp_reset_reason()));
             wifi_config_t station = {};
-            text += " wifi_rssi_dbm=" + String(WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : -127);
+            text += " wifi_rssi_dbm=" + String(networkConnected() ? WiFi.RSSI() : -127);
+            text += " wifi_driver_status=" + String(int(WiFi.status()));
+            text += " wifi_last_disconnect_reason=" + String(g_wifiDisconnectReason.load());
+            text += " wifi_connect_error=" + String(g_wifiConnectError);
+            text += " wifi_retry_count=" + String(g_wifiRetryCount);
+            text += " wifi_radio_restarts=" + String(g_wifiRadioRestarts);
             text += " wifi_listen_interval=" + String(esp_wifi_get_config(WIFI_IF_STA, &station) == ESP_OK
                 ? station.sta.listen_interval : 0);
             text += " free_heap=" + String(ESP.getFreeHeap());
@@ -1385,20 +1418,46 @@ static void setMaximumWifiTxPower() {
     }
 }
 
+static void stopNetworkServices() {
+    if (g_serverStarted) {
+        server.client().stop();
+        server.stop();
+        g_serverStarted = false;
+    }
+    if (g_mdnsStarted) MDNS.end();
+    g_mdnsStarted = g_wifiWasConnected = false;
+}
+
 void networkBegin() {
     if (g_config.ssid.isEmpty()) {
         startAccessPoint();
         return;
     }
 
+    static bool listening = false;
+    if (!listening) {
+        WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) {
+            g_wifiDisconnectReason.store(info.wifi_sta_disconnected.reason);
+        }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+        listening = true;
+    }
+
+    g_apMode = false;
+    g_wifiRetryCount = 0;
+    g_lastReconnect = millis();
+    g_wifiCheckedAt = g_lastReconnect - WIFI_CHECK_INTERVAL_MS;
+
     // The Arduino core applies its cached hostname when enabling STA mode.
     // Setting it afterward leaves DHCP advertising the default esp32-XXXXXX.
     WiFi.setHostname(g_config.hostname.c_str());
-    WiFi.mode(WIFI_STA);
+    if (!WiFi.mode(WIFI_STA)) {
+        Serial.println("[net] could not start Wi-Fi station");
+        return;
+    }
     WiFi.setSleep(false);  // Normal mode: keep the receiver awake.
     setMaximumWifiTxPower();
     // Configure credentials without associating, then set the listen interval
-    // before connection. No-argument begin() preserves it on every retry.
+    // before connection. Retry with the existing station configuration.
     WiFi.begin(g_config.ssid.c_str(), g_config.pass.c_str(), 0, nullptr, false);
     wifi_config_t station = {};
     if (esp_wifi_get_config(WIFI_IF_STA, &station) == ESP_OK) {
@@ -1407,10 +1466,7 @@ void networkBegin() {
             Serial.println("[net] could not configure Wi-Fi listen interval");
         }
     }
-    WiFi.begin();
-    g_apMode = false;
-    g_connectStart = millis();
-    g_lastReconnect = millis();
+    g_wifiConnectError = esp_wifi_connect();
     Serial.printf("[net] connecting ssid=%s\n", g_config.ssid.c_str());
 }
 
@@ -1420,16 +1476,20 @@ void networkLoop() {
 
     if (g_apMode) return;
 
-    if (WiFi.status() == WL_CONNECTED) {
+    uint32_t now = millis();
+    if (now - g_wifiCheckedAt < WIFI_CHECK_INTERVAL_MS) return;
+    g_wifiCheckedAt = now;
+    // Arduino's cached status can stay connected after an authentication
+    // timeout. Check association and the station's address as well.
+    wifi_ap_record_t ap = {};
+    bool associated = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+    if (associated && WiFi.status() == WL_CONNECTED && uint32_t(WiFi.localIP()) != 0) {
+        g_wifiRetryCount = 0;
         if (!g_wifiWasConnected) {
             // Reapply after association/country information is available, also
             // on reconnect, rather than relying only on the startup request.
             setMaximumWifiTxPower();
             g_wifiWasConnected = true;
-        }
-        if (!g_staEverConnected) {
-            g_staEverConnected = true;
-            g_connectStart = 0;
             Serial.printf("[net] station ssid=%s ip=%s rssi=%d hostname=%s\n",
                           WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
                           WiFi.RSSI(), stationHostname().c_str());
@@ -1442,30 +1502,39 @@ void networkLoop() {
         return;
     }
 
-    g_wifiWasConnected = false;
-    // Never give up. This covers wrong credentials, missing AP, and DHCP
-    // failure (associated but no IP). Retry forever every 10 seconds.
-    if (millis() - g_lastReconnect > 15000) {
-        g_lastReconnect = millis();
-        Serial.printf("[net] retry WiFi status=%d\n", (int)WiFi.status());
-        WiFi.disconnect();
-        WiFi.begin();
+    if (g_wifiWasConnected) {
+        g_wifiWasConnected = false;
+        g_lastReconnect = now;  // Give the driver's automatic retry time to work.
     }
+    if (now - g_lastReconnect < WIFI_RETRY_INTERVAL_MS) return;
+    g_lastReconnect = now;
+    if (g_wifiRetryCount == 2) {
+        Serial.println("[net] association or DHCP did not recover; restarting radio");
+        stopNetworkServices();
+        if (WiFi.mode(WIFI_OFF)) ++g_wifiRadioRestarts;
+        else Serial.println("[net] could not stop Wi-Fi radio");
+        networkBegin();
+        return;
+    }
+
+    ++g_wifiRetryCount;
+    // Force a fresh association if DHCP stalled. Use the driver directly so
+    // the stale Arduino status cannot short-circuit the connect request.
+    if (associated) esp_wifi_disconnect();
+    g_wifiConnectError = esp_wifi_connect();
+    Serial.printf("[net] Wi-Fi retry %u status=%d associated=%d reason=%u result=%d\n",
+                  g_wifiRetryCount, int(WiFi.status()), int(associated),
+                  g_wifiDisconnectReason.load(), g_wifiConnectError);
 }
 
 bool networkSuspended() { return g_networkSuspended; }
+bool networkConnected() { return g_wifiWasConnected && !g_networkSuspended && !g_apMode; }
 
 bool networkSetSuspended(bool suspended) {
     if (g_networkSuspended == suspended) return true;
     g_networkSuspended = suspended;
     if (suspended) {
-        if (g_serverStarted) {
-            server.client().stop();
-            server.stop();
-            g_serverStarted = false;
-        }
-        if (g_mdnsStarted) MDNS.end();
-        g_mdnsStarted = g_staEverConnected = g_wifiWasConnected = false;
+        stopNetworkServices();
         if (WiFi.mode(WIFI_OFF)) return true;
         // Keep the device recoverable if the driver could not stop the radio.
         g_networkSuspended = false;

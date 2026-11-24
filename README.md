@@ -155,9 +155,10 @@ In the device test, battery handoff continued working and live readings returned
 after undocking. The screen's plug means base power and charging power are available, without confirming charging current or full status;
 `?` means no current battery reading and does not mean empty.
 
-Web -> **Power** shows a battery icon; **Refresh** updates its fill level.
-An unavailable reading shows `?`; hovering the icon reveals its status or
-approximate percentage. `GET /power` retains the text reading, while
+The web title bar shows Wi-Fi, HA, battery, and powered-dock status.
+The battery uses Bootstrap Icons without percentage text; an unavailable reading
+shows `?`. The dock uses `uix-sharp:charging-dock`. **Power → Refresh** updates
+the battery icon. `GET /power` retains the text reading, while
 `GET /power?format=icon` returns the icon. Core Basic's IP5306 does not expose
 battery/VBUS voltage readings.
 `/diag` uses `charging=unknown` when there is no confirmed charging/full signal;
@@ -547,7 +548,7 @@ working memory. Capturing does not wake the display or change pages.
 | `POST /display` | Preview the display with form field `mode=wake`, `dim`, or `off`; settings are not saved |
 | `GET /power` | Current approximate battery percentage as text |
 | `GET /power?format=icon` | Battery icon; an unavailable reading shows `?` |
-| `GET /dock` | Physical dock state as JSON; no charger read or display wake |
+| `GET /dock` | Physical dock, Wi-Fi, and HA status as JSON; no charger read or display wake |
 | `GET /diag` | Menu, backlight, LED, and power diagnostics; reading it does not wake the display |
 | `GET /diag/crash` | Saved crash summary and backtrace; requires the firmware username/password |
 | `GET /screenshot.bmp` | Stream the current display as `ha-remote-screen.bmp`; does not redraw or wake the display |
@@ -572,6 +573,11 @@ Connection diagnostics include `wifi_connected`, `ws_connected`, `ws_connections
 event has been recorded. `ws_last_disconnect_time` also reports the disconnect
 in HA local time when available. `ws_loop_max_gap_ms` records the longest gap
 between WebSocket processing calls.
+
+Wi-Fi reconnects on wake and verifies both association and an IP address.
+If two retries fail, it restarts the Wi-Fi radio and reopens web access after
+rejoining. `/diag` includes `wifi_last_disconnect_reason`, `wifi_connect_error`,
+`wifi_retry_count`, and `wifi_radio_restarts`.
 
 HA HTTP requests run asynchronously. Navigation, display scheduling, web handling,
 and WebSocket updates continue while a command or state read is in progress.

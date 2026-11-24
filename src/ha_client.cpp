@@ -80,7 +80,7 @@ String haClockStatus() {
 }
 
 String haConnectionStatus() {
-    String text = "wifi_connected=" + String(WiFi.status() == WL_CONNECTED ? 1 : 0);
+    String text = "wifi_connected=" + String(networkConnected() ? 1 : 0);
     text += " ha_data_suspended=" + String(g_dataSuspended ? 1 : 0);
     text += " ha_data_generation=" + String(g_dataGeneration);
     text += " ha_http_discarded=" + String(g_discardedHttp);
@@ -786,7 +786,7 @@ static void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
             Serial.printf("[ha] ws disconnected at=%lu count=%lu wifi=%d\n",
                           static_cast<unsigned long>(g_linkStats.lastDisconnectMs),
                           static_cast<unsigned long>(g_linkStats.disconnects),
-                          WiFi.status() == WL_CONNECTED);
+                          networkConnected());
             break;
         case WStype_TEXT:
             wsHandleText(payload, length);

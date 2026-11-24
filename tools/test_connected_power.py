@@ -157,7 +157,7 @@ static void renderInitial(){panelEvents.push_back("paint");}
 AppConfig g_config;
 static constexpr int WL_CONNECTED=3;
 static int wifiStatus=WL_CONNECTED;
-struct {int status(){return wifiStatus;}}WiFi;
+bool networkConnected(){return wifiStatus==WL_CONNECTED;}
 static bool configured=true,wsReady=true,fetchOk=true,auxOk=true,injectAux=false;
 static bool dimActionPending(){return false;}
 bool haConfigured(){return configured;}

@@ -34,7 +34,7 @@ static uint32_t g_dataGeneration=0,g_discardedHttp=0;
 struct {int loops=0;void loop(){++loops;} void disconnect(){} void setReconnectInterval(int){} void pollConnect(){} } ws;
 enum WStype_t {WStype_CONNECTED,WStype_DISCONNECTED,WStype_TEXT,WStype_ERROR};
 static constexpr int WL_CONNECTED=3;
-struct {int status(){return WL_CONNECTED;}} WiFi;
+bool networkConnected(){return true;}
 static bool g_wsStarted=true,g_wsAuthed=false;
 static uint32_t g_wsMessageId=1,g_wsClockId=0,g_clockRetryAt=0;
 static uint32_t g_wsStateId=0,g_stateRetryAt=0;

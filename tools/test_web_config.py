@@ -39,6 +39,7 @@ void endConnectedPowerWork(){}
 #include "ha_client.h"
 #include "html_stream.h"
 #include "power_status.h"
+#include "web_icon_licenses.h"
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
@@ -64,11 +65,13 @@ static WebServer server;
 AppConfig g_config;
 static bool g_apMode=false;
 static constexpr int WL_CONNECTED=3;
-struct {int status(){return WL_CONNECTED;}String SSID(){return "test";}} WiFi;
+struct {int state=WL_CONNECTED;String SSID(){return "test";}} WiFi;
+bool networkConnected(){return !g_apMode && WiFi.state==WL_CONNECTED;}
 static uint32_t millis(){return 1000;}
 static int serviced=0;
 void haLoop(){++serviced;}
-bool haWsConnected(){return true;}
+static bool testHa=true;
+bool haWsConnected(){return testHa;}
 bool haDataSuspended(){return false;}
 String networkIp(){return "192.0.2.1";}
 String haTimeZone(){return "Asia/Shanghai";}
@@ -87,14 +90,28 @@ int main(int argc,char** argv){
     assert(powerIcon().find("Battery status unavailable")!=String::npos);
     assert(powerIcon().find(">?</text>")!=String::npos);
     testPower.batteryPercent=0;
-    assert(powerIcon().find("Battery: 0%")!=String::npos);
+    assert(powerIcon().find("Battery empty")!=String::npos);
     assert(powerIcon().find(">?</text>")==String::npos);
     testPower.batteryPercent=100;
-    assert(powerIcon().find("Battery: 100%")!=String::npos);
-    assert(powerIcon().find("width=\"32\"")!=String::npos);
+    assert(powerIcon().find("bi-battery-full")!=String::npos);
+    for(int percent:{1,25,26,50,74,75,100}){
+        testPower.batteryPercent=percent;
+        auto svg=powerIcon();
+        assert(svg.find(percent<=25?"bi-battery-low":percent<75?"bi-battery-half":"bi-battery-full")!=String::npos);
+        assert(svg.find('%')==String::npos);
+        assert(svg.find("Copyright (c) 2019-2024 The Bootstrap Authors")!=String::npos);
+    }
     assert(dockIcon().find("aria-label=\"Base powered; charging available\"")!=String::npos);
+    assert(dockIcon().find("uix-sharp:charging-dock")!=String::npos);
+    assert(dockIcon().find("Copyright (c) 2026 Rakib Shekh")!=String::npos);
     testPower.batteryPercent=75;
     g_config.ssid="test";g_config.hostname="test-remote";g_config.haUrl="http://ha";g_config.haToken="test";
+    assert(dockWebStatus()=="{\"docked\":false,\"wifi\":\"connected\",\"ha\":\"connected\"}");
+    testHa=false;assert(dockWebStatus().find("\"ha\":\"disconnected\"")!=String::npos);testHa=true;
+    WiFi.state=0;assert(dockWebStatus().find("\"wifi\":\"disconnected\",\"ha\":\"disconnected\"")!=String::npos);
+    g_apMode=true;assert(dockWebStatus().find("\"wifi\":\"ap\"")!=String::npos);
+    g_config.haToken="";assert(dockWebStatus().find("\"ha\":\"unconfigured\"")!=String::npos);
+    g_apMode=false;WiFi.state=WL_CONNECTED;g_config.haToken="test";
     for(int p=0;p<MAX_PAGES;++p)g_config.pageTitles[p]="Room & lights";
     for(int i=0;i<MAX_ENTITIES;++i){
         g_config.entities[i]="climate.ac";g_config.entityNames[i]="AC <room>";
@@ -126,6 +143,15 @@ int main(int argc,char** argv){
         assert(html.find(testDock?"id=\"dock-status\" role=\"status\">":"id=\"dock-status\" role=\"status\" hidden>")!=std::string::npos);
         assert(html.find("fetch('/dock'")!=std::string::npos);
         assert(html.find("new FormData(form)")!=std::string::npos);
+        auto title=html.substr(html.find("<div class=\"actions top\">"));
+        title=title.substr(0,title.find("<div id=\"save-status\""));
+        for(const char* id:{"wifi-status","ha-status","power-status","dock-status"}){
+            auto attr=std::string("id=\"")+id+"\"";
+            auto pos=title.find(attr);assert(pos!=std::string::npos && html.find(attr)==html.rfind(attr));
+        }
+        assert(title.find("role=\"group\" aria-label=\"Device status\"")!=std::string::npos);
+        assert(title.find("75%")==std::string::npos);
+        assert(title.find("<button type=\"submit\">Save and reboot</button>")!=std::string::npos);
         auto power=html.substr(html.find("<legend>Power</legend>"));
         power=power.substr(0,power.find("</fieldset>"));
         auto lowbat=power.find("name=\"lowbat\">");assert(lowbat!=std::string::npos);
@@ -162,7 +188,7 @@ with tempfile.TemporaryDirectory(prefix='m5-web-config-') as directory:
     tmp = Path(directory)
     (tmp / 'Arduino.h').write_text(arduino)
     signatures = ['static String htmlEscape(', 'static String formatTime(',
-                  'static String htmlHeader(', 'static String htmlFooter(', 'static String powerIcon(', 'static String dockIcon(',
+                  'static String htmlHeader(', 'static String htmlFooter(', 'static String powerIcon(', 'static String dockIcon(', 'static String dockWebStatus(',
                   'static void refreshEntityOptions(', 'static void handleRoot(']
     (tmp / 'test.cpp').write_text(prefix + source[source.index('static String g_cachedEntityOptions;'):source.index('static void refreshEntityOptions(')] + ''.join(function(s) for s in signatures) + tests)
     subprocess.run(['g++', '-std=c++17', '-O2', '-Wall', '-Wextra', '-Werror', f'-I{tmp}',

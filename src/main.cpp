@@ -158,7 +158,7 @@ static bool g_statusBatteryDirty = false;
 static bool g_statusDockDirty = false;
 static int g_lastBatteryPct = -1;
 static bool g_lastCharging = false;
-static wl_status_t g_lastWifiStatus = WL_IDLE_STATUS;
+static bool g_lastWifiStatus = false;
 static bool g_dirty[MAX_ENTITIES] = {false};
 
 static int pageCount() {
@@ -187,7 +187,7 @@ static bool g_refreshPending[MAX_ENTITIES] = {};
 static bool g_fullRefreshStarted = false;
 static uint32_t g_lastFullRefresh = 0;
 static uint32_t g_restRefreshReads = 0, g_fullRefreshes = 0;
-static wl_status_t g_prevWifiLink = WL_IDLE_STATUS;
+static bool g_prevWifiLink = false;
 
 String refreshStatus() {
     unsigned pending = 0, primaryReady = 0, auxReady = 0;
@@ -1099,7 +1099,7 @@ static void drawBattery(LovyanGFX& g, int x, int y, int pct, bool charging,
 
 // Combined Wi-Fi + HA link indicator; blink while either connection is down.
 static void drawLinkIcon(LovyanGFX& g, int x, int y) {
-    bool wifiUp = (WiFi.status() == WL_CONNECTED);
+    bool wifiUp = networkConnected();
     bool linkUp = wifiUp && g_haOnline;
 
     // Connecting, retrying or disconnected: blink the signal icon.
@@ -2360,7 +2360,7 @@ static void finishRefreshRead(int index, bool ok) {
 }
 
 static void refreshTick() {
-    if (haDataSuspended() || dimActionPending() || !haConfigured() || WiFi.status() != WL_CONNECTED || g_refreshInFlight) return;
+    if (haDataSuspended() || dimActionPending() || !haConfigured() || !networkConnected() || g_refreshInFlight) return;
 
     uint32_t fullInterval = haStateUpdatesReady() ? 1800000 : 30000;
     if (!g_fullRefreshStarted || millis() - g_lastFullRefresh >= fullInterval) {
@@ -2498,7 +2498,7 @@ void setup() {
     PowerStatus power = readPowerStatus();
     g_lastBatteryPct = power.batteryPercent;
     g_lastCharging = power.charging == ChargeState::Charging;
-    g_lastWifiStatus = WiFi.status();
+    g_lastWifiStatus = networkConnected();
 
     bool dockWake = deepSleepWakeCause() == DeepWake::DockChange;
     if (dockWake) g_scheduleNight = deepSleepWasNight();
@@ -2533,7 +2533,7 @@ void setup() {
     g_detailGlobal = -1;
     g_lastActivity = millis();
     g_appliedBrightness = -1;
-    g_prevWifiLink = WiFi.status();
+    g_prevWifiLink = networkConnected();
 
     haSetStateCallback(onHaState);
     haSetStatusCallback(onHaStatus);
@@ -2630,8 +2630,8 @@ void loop() {
     char keypadKey = keypadPoll();
     if (keypadKey) handleKey(keypadKey);
 
-    wl_status_t wifiNow = WiFi.status();
-    if (wifiNow == WL_CONNECTED && g_prevWifiLink != WL_CONNECTED) {
+    bool wifiNow = networkConnected();
+    if (wifiNow && !g_prevWifiLink) {
         // Wi-Fi is back: resync every page and let HA reconnect.
         g_nextRefresh = 0;
         g_refreshIndex = -1;
@@ -2640,7 +2640,7 @@ void loop() {
     }
     g_prevWifiLink = wifiNow;
 
-    if (!g_haStarted && wifiNow == WL_CONNECTED && haConfigured() && !haDataSuspended()) {
+    if (!g_haStarted && wifiNow && haConfigured() && !haDataSuspended()) {
         haBegin();
         g_haStarted = true;
         g_nextRefresh = 0;
@@ -2655,7 +2655,7 @@ void loop() {
     if (!haDataSuspended() && millis() - lastBlink > 500) {
         lastBlink = millis();
         g_linkBlinkOn = !g_linkBlinkOn;
-        bool linkUp = (WiFi.status() == WL_CONNECTED) && g_haOnline;
+        bool linkUp = networkConnected() && g_haOnline;
         if (!haDataSuspended() && !linkUp) g_statusLinkDirty = true;
     }
 
@@ -2677,7 +2677,7 @@ void loop() {
             g_statusBatteryDirty = true;
         }
 
-        wl_status_t wifiStatus = WiFi.status();
+        bool wifiStatus = networkConnected();
         if (wifiStatus != g_lastWifiStatus) {
             g_lastWifiStatus = wifiStatus;
             g_statusLinkDirty = true;

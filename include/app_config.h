@@ -58,6 +58,7 @@ void networkBegin();
 void networkLoop();
 bool networkSetSuspended(bool suspended);
 bool networkSuspended();
+bool networkConnected();
 bool configModeActive();
 String networkIp();
 String commandLedsStatus();
