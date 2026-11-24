@@ -59,6 +59,13 @@ void networkLoop();
 bool networkSetSuspended(bool suspended);
 bool networkSuspended();
 bool networkConnected();
+inline uint8_t wifiSignalBars(bool connected, int rssi) {
+    if (!connected) return 0;
+    if (rssi > -55) return 4;
+    if (rssi > -65) return 3;
+    if (rssi > -75) return 2;
+    return 1;
+}
 bool configModeActive();
 String networkIp();
 String commandLedsStatus();

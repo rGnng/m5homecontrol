@@ -156,6 +156,7 @@ after undocking. The screen's plug means base power and charging power are avail
 `?` means no current battery reading and does not mean empty.
 
 The web title bar shows Wi-Fi, HA, battery, and powered-dock status.
+Wi-Fi uses Bootstrap Reception bars. HA uses House or House X.
 The battery uses Bootstrap Icons without percentage text; an unavailable reading
 shows `?`. The dock uses `uix-sharp:charging-dock`. **Power → Refresh** updates
 the battery icon. `GET /power` retains the text reading, while

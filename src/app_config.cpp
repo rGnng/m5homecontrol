@@ -301,8 +301,9 @@ static String htmlHeader(const String& title) {
     h += ".connection-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0}";
     h += ".connection-row+.connection-row{border-top:1px solid #222}.connection-info{min-width:0}";
     h += ".connection-name{display:block;color:#ddd;font-size:14px}.connection-value{display:block;color:#888;font-size:12px;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}";
-    h += ".connection-state{flex-shrink:0;font-size:12px;color:#999}.connection-state:before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;margin-right:6px}";
+    h += ".connection-state{display:flex;align-items:center;gap:5px;flex-shrink:0;font-size:12px;color:#999}";
     h += ".connection-state.up{color:#92c5a4}.connection-state.down{color:#d99898}";
+    h += "#ha-status.up .bi-house-x,#ha-status:not(.up) .bi-house{display:none}";
     h += ".metadata{display:grid;grid-template-columns:auto minmax(0,1fr);gap:5px 12px;font-size:12px;color:#888}.metadata dd{margin:0;color:#bbb;overflow-wrap:anywhere}";
     h += ".connection-clock{margin:8px 0 0;padding-top:10px;border-top:1px solid #222}";
     h += ".modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:20}";
@@ -338,13 +339,13 @@ static String htmlHeader(const String& title) {
     h += ".display-preview button[data-error=true]{border-color:#d77}";
     h += ".actions.top{display:grid;grid-template-columns:auto 1fr auto;gap:12px;margin:0 0 16px}";
     h += ".actions.top h1{margin:0;white-space:nowrap}.actions.top button{flex-shrink:0;white-space:nowrap}";
-    h += ".title-status{display:flex;align-items:center;justify-content:flex-end;gap:14px;min-width:0}.title-status [hidden]{display:none}";
+    h += ".title-status{display:flex;align-items:center;gap:14px;min-width:0}.title-status [hidden]{display:none}";
     h += ".footer-actions{justify-content:flex-end;margin:16px 0 0}";
     h += ".device-info{margin:12px 0 0}";
     h += ".device-actions{margin:0}";
     h += ".save-status{color:#bbb;font-size:14px;margin:0 0 16px}.save-status:empty{display:none}";
     h += "@media(max-width:800px){.layout{grid-template-columns:1fr}}";
-    h += "@media(max-width:600px){.actions.top{grid-template-columns:1fr auto}.title-status{grid-row:2;grid-column:1/-1;justify-content:flex-start}.actions.top>button{grid-row:1;grid-column:2}}";
+    h += "@media(max-width:600px){.actions.top{grid-template-columns:1fr auto}.title-status{grid-row:2;grid-column:1/-1}.actions.top>button{grid-row:1;grid-column:2}}";
     h += "@media(max-width:400px){.actions.top h1{font-size:20px}.battery-saving{font-size:10.5px;gap:1px}.sleep-delay{gap:1px}}";
     h += "</style></head><body>";
     return h;
@@ -397,13 +398,33 @@ static String powerIcon() {
     return svg + BOOTSTRAP_ICON_LICENSE + "</svg>";
 }
 
+static String wifiReceptionIcon(int level) {
+    String svg = "<svg aria-hidden=\"true\" width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"currentColor\" class=\"bi bi-reception-" + String(level) + "\">";
+    // Bootstrap's Reception variants share four rounded bars on a common baseline.
+    for (int i = 0; i < 4; ++i) {
+        int height = i < level ? (i + 1) * 3 : 1;
+        svg += "<rect x=\"" + String(i * 4) + "\" y=\"" + String(14 - height) +
+               "\" width=\"3\" height=\"" + String(height) + "\" rx=\".5\"/>";
+    }
+    return svg + "</svg>";
+}
+
+static const char* haConnectionIcons() {
+    return R"SVG(<svg aria-hidden="true" class="bi bi-house" width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+<path d="M8.707 1.5a1 1 0 0 0-1.414 0L.646 8.146a.5.5 0 0 0 .708.708L2 8.207V13.5A1.5 1.5 0 0 0 3.5 15h9a1.5 1.5 0 0 0 1.5-1.5V8.207l.646.647a.5.5 0 0 0 .708-.708L13 5.793V2.5a.5.5 0 0 0-.5-.5h-1a.5.5 0 0 0-.5.5v1.293zM13 7.207V13.5a.5.5 0 0 1-.5.5h-9a.5.5 0 0 1-.5-.5V7.207l5-5z"/>
+</svg><svg aria-hidden="true" class="bi bi-house-x" width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+<path d="M7.293 1.5a1 1 0 0 1 1.414 0L11 3.793V2.5a.5.5 0 0 1 .5-.5h1a.5.5 0 0 1 .5.5v3.293l2.354 2.353a.5.5 0 0 1-.708.708L8 2.207l-5 5V13.5a.5.5 0 0 0 .5.5h4a.5.5 0 0 1 0 1h-4A1.5 1.5 0 0 1 2 13.5V8.207l-.646.647a.5.5 0 1 1-.708-.708z"/>
+<path d="M12.5 16a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7m-.646-4.854.646.647.646-.646a.5.5 0 0 1 .708.707l-.647.646.647.646a.5.5 0 0 1-.708.708l-.646-.647-.646.647a.5.5 0 0 1-.708-.707l.647-.647-.646-.646a.5.5 0 0 1 0-.707Z"/>
+</svg>)SVG";
+}
+
 static String dockWebStatus() {
     bool wifi = networkConnected();
     const char* ha = g_config.haToken.isEmpty() ? "unconfigured"
                     : wifi && haWsConnected() ? "connected" : "disconnected";
     return String("{\"docked\":") + (dockConnected() ? "true" : "false") +
            ",\"wifi\":\"" + (g_apMode ? "ap" : wifi ? "connected" : "disconnected") +
-           "\",\"ha\":\"" + ha + "\"}";
+           "\",\"ha\":\"" + ha + "\",\"wifi_level\":" + String(wifiSignalBars(wifi, wifi ? WiFi.RSSI() : 0)) + "}";
 }
 
 static String g_cachedEntityOptions;
@@ -435,6 +456,9 @@ static void handleRoot() {
     page += htmlHeader("HA Remote Setup");
 
     bool wifiConnected = networkConnected();
+    int wifiLevel = wifiSignalBars(wifiConnected, wifiConnected ? WiFi.RSSI() : 0);
+    String wifiStatus = g_apMode ? "Access point" : wifiConnected ? "Connected" : "Disconnected";
+    if (wifiConnected) wifiStatus += " (" + String(wifiLevel) + " of 4 bars)";
     String wifiLabel = g_apMode ? String("HA-Remote")
                                : htmlEscape(wifiConnected ? WiFi.SSID() : g_config.ssid);
     String haLabel;
@@ -454,9 +478,13 @@ static void handleRoot() {
     page += "<div class=\"actions top\"><h1>HA Remote</h1>";
     page += "<div class=\"title-status\" role=\"group\" aria-label=\"Device status\">";
     page += "<span id=\"wifi-status\" class=\"connection-state " + String(wifiConnected ? "up" : (g_apMode ? "idle" : "down")) +
-            "\" role=\"status\" aria-label=\"Wi-Fi: " + String(g_apMode ? "Access point" : (wifiConnected ? "Connected" : "Disconnected")) + "\">Wi-Fi</span>";
+            "\" role=\"status\" aria-label=\"Wi-Fi: " + wifiStatus + "\" title=\"Wi-Fi: " + wifiStatus + "\">";
+    page += wifiReceptionIcon(wifiLevel);
+    page += "Wi-Fi</span>";
     page += "<span id=\"ha-status\" class=\"connection-state " + haState +
-            "\" role=\"status\" aria-label=\"Home Assistant: " + haLabel + "\">HA</span>";
+            "\" role=\"status\" aria-label=\"Home Assistant: " + haLabel + "\">";
+    page += haConnectionIcons();
+    page += "HA</span>";
     page += "<span id=\"power-status\" role=\"status\">" + powerIcon() + "</span>";
     page += "<span id=\"dock-status\" role=\"status\"" + String(dockConnected() ? "" : " hidden") + ">" + dockIcon() + "</span></div>";
     page += "<button type=\"submit\">Save and reboot</button></div>";
@@ -789,6 +817,17 @@ async function refreshDock() {
     const state = await response.json();
     status.hidden = !state.docked;
     status.removeAttribute('title');
+    const level = state.wifi_level;
+    const validLevel = Number.isInteger(level) && level >= 0 && level <= 4;
+    if (validLevel) {
+      const icon = document.querySelector('#wifi-status svg');
+      icon.setAttribute('class', 'bi bi-reception-' + level);
+      icon.querySelectorAll('rect').forEach((bar, i) => {
+        const height = i < level ? (i + 1) * 3 : 1;
+        bar.setAttribute('y', 14 - height);
+        bar.setAttribute('height', height);
+      });
+    }
     for (const [name, label] of [['wifi', 'Wi-Fi'], ['ha', 'Home Assistant']]) {
       const indicator = document.getElementById(name + '-status');
       const value = state[name];
@@ -798,8 +837,9 @@ async function refreshDock() {
           value === 'ap' || value === 'unconfigured' ? 'idle' : 'down');
       const detail = connected ? 'Connected' : value === 'ap' ? 'Access point' :
           value === 'unconfigured' ? 'Not configured' : 'Disconnected';
-      indicator.setAttribute('aria-label', label + ': ' + detail);
-      indicator.title = label + ': ' + detail;
+      const signal = name === 'wifi' && connected && validLevel ? ' (' + level + ' of 4 bars)' : '';
+      indicator.setAttribute('aria-label', label + ': ' + detail + signal);
+      indicator.title = label + ': ' + detail + signal;
     }
   } catch (error) {
     status.title = 'Dock status unavailable';

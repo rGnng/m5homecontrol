@@ -1105,14 +1105,7 @@ static void drawLinkIcon(LovyanGFX& g, int x, int y) {
     // Connecting, retrying or disconnected: blink the signal icon.
     if (!haDataSuspended() && !linkUp && !g_linkBlinkOn) return;
 
-    int rssi = wifiUp ? WiFi.RSSI() : -100;
-    int bars = 0;
-    if (wifiUp) {
-        if (rssi > -55) bars = 4;
-        else if (rssi > -65) bars = 3;
-        else if (rssi > -75) bars = 2;
-        else bars = 1;
-    }
+    int bars = wifiSignalBars(wifiUp, wifiUp ? WiFi.RSSI() : 0);
     for (int i = 0; i < 4; i++) {
         int h = 4 + i * 3;
         uint16_t c = (i < bars) ? g_theme.barText : g_theme.dotOff;

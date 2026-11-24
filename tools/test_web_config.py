@@ -65,7 +65,7 @@ static WebServer server;
 AppConfig g_config;
 static bool g_apMode=false;
 static constexpr int WL_CONNECTED=3;
-struct {int state=WL_CONNECTED;String SSID(){return "test";}} WiFi;
+struct {int state=WL_CONNECTED,rssi=-50;int RSSI(){return rssi;}String SSID(){return "test";}} WiFi;
 bool networkConnected(){return !g_apMode && WiFi.state==WL_CONNECTED;}
 static uint32_t millis(){return 1000;}
 static int serviced=0;
@@ -106,9 +106,15 @@ int main(int argc,char** argv){
     assert(dockIcon().find("Copyright (c) 2026 Rakib Shekh")!=String::npos);
     testPower.batteryPercent=75;
     g_config.ssid="test";g_config.hostname="test-remote";g_config.haUrl="http://ha";g_config.haToken="test";
-    assert(dockWebStatus()=="{\"docked\":false,\"wifi\":\"connected\",\"ha\":\"connected\"}");
+    assert(dockWebStatus()=="{\"docked\":false,\"wifi\":\"connected\",\"ha\":\"connected\",\"wifi_level\":4}");
+    for(auto sample: {std::pair<int,int>{-55,3}, {-65,2}, {-75,1}, {-90,1}}){
+        WiFi.rssi=sample.first;
+        assert(dockWebStatus().find("\"wifi_level\":"+std::to_string(sample.second)+"}")!=String::npos);
+    }
+    WiFi.rssi=-50;
     testHa=false;assert(dockWebStatus().find("\"ha\":\"disconnected\"")!=String::npos);testHa=true;
     WiFi.state=0;assert(dockWebStatus().find("\"wifi\":\"disconnected\",\"ha\":\"disconnected\"")!=String::npos);
+    assert(dockWebStatus().find("\"wifi_level\":0")!=String::npos);
     g_apMode=true;assert(dockWebStatus().find("\"wifi\":\"ap\"")!=String::npos);
     g_config.haToken="";assert(dockWebStatus().find("\"ha\":\"unconfigured\"")!=String::npos);
     g_apMode=false;WiFi.state=WL_CONNECTED;g_config.haToken="test";
@@ -150,6 +156,8 @@ int main(int argc,char** argv){
             auto pos=title.find(attr);assert(pos!=std::string::npos && html.find(attr)==html.rfind(attr));
         }
         assert(title.find("role=\"group\" aria-label=\"Device status\"")!=std::string::npos);
+        assert(title.find("class=\"bi bi-reception-4\"")!=std::string::npos);
+        assert(title.find("class=\"bi bi-house\"")!=std::string::npos && title.find("class=\"bi bi-house-x\"")!=std::string::npos);
         assert(title.find("75%")==std::string::npos);
         assert(title.find("<button type=\"submit\">Save and reboot</button>")!=std::string::npos);
         auto power=html.substr(html.find("<legend>Power</legend>"));
@@ -188,7 +196,8 @@ with tempfile.TemporaryDirectory(prefix='m5-web-config-') as directory:
     tmp = Path(directory)
     (tmp / 'Arduino.h').write_text(arduino)
     signatures = ['static String htmlEscape(', 'static String formatTime(',
-                  'static String htmlHeader(', 'static String htmlFooter(', 'static String powerIcon(', 'static String dockIcon(', 'static String dockWebStatus(',
+                  'static String htmlHeader(', 'static String htmlFooter(', 'static String powerIcon(', 'static String dockIcon(',
+                  'static String wifiReceptionIcon(', 'static const char* haConnectionIcons(', 'static String dockWebStatus(',
                   'static void refreshEntityOptions(', 'static void handleRoot(']
     (tmp / 'test.cpp').write_text(prefix + source[source.index('static String g_cachedEntityOptions;'):source.index('static void refreshEntityOptions(')] + ''.join(function(s) for s in signatures) + tests)
     subprocess.run(['g++', '-std=c++17', '-O2', '-Wall', '-Wextra', '-Werror', f'-I{tmp}',
